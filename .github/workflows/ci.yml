@@ -59,3 +59,16 @@ jobs:
           files=(scripts/*.sh installer/*.sh)
           echo "checking: ${files[*]}"
           shellcheck "${files[@]}"
+
+  unit-verify:
+    # systemd-analyze needs the unit's User and ExecStart path to resolve,
+    # so fabricate both before verifying.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify unit file
+        run: |
+          sudo useradd --system rskycam
+          sudo install -m 755 /dev/null /usr/local/bin/rskycam
+          sudo mkdir -p /var/lib/rskycam
+          sudo systemd-analyze verify installer/rskycam.service

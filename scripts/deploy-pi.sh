@@ -12,7 +12,7 @@ HOST="${1:-pi@rpiwhite.local}"
 cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.36 --features embed-ui
 
 scp target/aarch64-unknown-linux-gnu/release/rskycam "$HOST:~/rskycam.new"
-scp assets/asi/99-asi.rules "$HOST:~/99-asi.rules.new"
+scp installer/99-asi.rules "$HOST:~/99-asi.rules.new"
 ssh "$HOST" 'bash -s' <<'REMOTE'
 set -eu
 RUSER=$(id -un)
