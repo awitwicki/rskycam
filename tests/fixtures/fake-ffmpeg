@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Test stand-in for ffmpeg. The output file is the last argument.
+# - Records the received argv next to the output (<output>.args).
+# - Fails with recognizable stderr when a "fake-ffmpeg-fail" marker file
+#   exists in the output directory (parallel-test-safe failure injection).
+set -eu
+out="${@: -1}"
+dir="$(dirname "$out")"
+printf '%s\n' "$*" > "$out.args"
+if [ -f "$dir/fake-ffmpeg-sleep" ]; then
+  sleep "$(cat "$dir/fake-ffmpeg-sleep")"
+fi
+if [ -f "$dir/fake-ffmpeg-fail" ]; then
+  echo "simulated encoder explosion" >&2
+  exit 1
+fi
+printf 'fake-video' > "$out"

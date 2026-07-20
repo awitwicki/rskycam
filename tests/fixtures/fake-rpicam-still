@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Test double for rpicam-still: understands --version and "-o -" (JPEG to stdout).
+if [[ "$*" == *"--version"* ]]; then echo "fake rpicam-still v1"; exit 0; fi
+cat "$(dirname "$0")/frame-64x48.jpg"

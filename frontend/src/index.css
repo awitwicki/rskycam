@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+@theme {
+  --color-night: #0a0e17;
+  --color-panel: #121826;
+  --color-panel2: #1a2334;
+  --color-line: #232d44;
+  --color-fg: #e2e8f4;
+  --color-fgdim: #8593b0;
+  --color-accent: #4cc9f0;
+  --color-ok: #4cf0a4;
+  --color-warn: #f0a44c;
+  --color-danger: #f04c6a;
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-night text-fg font-sans antialiased;
+}
+
+/* Dark-theme OpenStreetMap: invert the tile colors, keep controls readable. */
+.map-dark .leaflet-container {
+  background: var(--color-night);
+  font: inherit;
+}
+.map-dark .leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9) saturate(0.6);
+}
+.map-dark .leaflet-control-attribution {
+  background: color-mix(in srgb, var(--color-panel) 85%, transparent);
+  color: var(--color-fgdim);
+}
+.map-dark .leaflet-control-attribution a {
+  color: var(--color-accent);
+}
+.map-dark .leaflet-bar a {
+  background: var(--color-panel2);
+  color: var(--color-fg);
+  border-color: var(--color-line);
+}

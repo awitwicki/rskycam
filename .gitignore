@@ -1,0 +1,10 @@
+/research/
+node_modules/
+/target/
+/data/
+
+.superpowers/
+
+.DS_Store
+
+docs/

@@ -1,0 +1,17 @@
+ACTION=="add", ATTR{idVendor}=="03c3", RUN+="/bin/sh -c '/bin/echo 1024 >/sys/module/usbcore/parameters/usbfs_memory_mb'"
+# All ASI Cameras and filter wheels
+SUBSYSTEMS=="usb", ATTR{idVendor}=="03c3", MODE="0666"
+
+# NOTE: the upstream indi rule also granted world access to USB bind/unbind
+# and module drivers_autoprobe (un-scoped by vendor). rskycam's snap-mode
+# driver never rebinds drivers, so those over-broad grants are omitted here.
+
+# Set permissions for USB power management
+# For ASI device power control
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="03c3", MODE="0666", RUN+="/bin/sh -c 'chmod 666 /sys$devpath/power/level'"
+
+# For parent hub power control
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="03c3", MODE="0666", RUN+="/bin/sh -c 'chmod 666 /sys$devpath/../power/level'"
+
+# access EFWmini through a system libusb
+KERNEL=="hidraw*", ATTRS{idVendor}=="03c3", MODE="0666", TAG+="uaccess"
