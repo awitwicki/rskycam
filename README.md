@@ -13,6 +13,36 @@ optionally a BME280 environmental sensor over I2C.
   frontend-specific notes.
 - `scripts/deploy-pi.sh` — cross-compile + deploy to a Raspberry Pi over SSH.
 
+## Install on a Raspberry Pi
+
+On a Raspberry Pi OS (64-bit) machine:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/awitwicki/rskycam/main/installer/install.sh | sudo bash
+```
+
+This installs `ffmpeg`, downloads the latest release (checksum-verified),
+creates a `rskycam` system user with data dir `/var/lib/rskycam`, installs
+the ZWO udev rule and a hardened systemd service, starts it, and prints
+the dashboard URL (port 8080). Default login: `admin` / `pa$$word!0` —
+change it in Settings.
+
+**Update:** re-run the same command. It replaces the binary, udev rule and
+service, restarts, and never touches `/var/lib/rskycam` (config + images).
+Pin a version with `sudo RSKYCAM_VERSION=v0.4.0 bash`.
+
+**Logs:** `journalctl -u rskycam -f` (journald handles rotation).
+
+**Uninstall:**
+
+```bash
+sudo systemctl disable --now rskycam
+sudo rm /etc/systemd/system/rskycam.service /etc/udev/rules.d/99-asi.rules /usr/local/bin/rskycam
+sudo rm -r /usr/local/share/doc/rskycam
+sudo rm -r /var/lib/rskycam   # deletes all captured images and config
+sudo userdel rskycam
+```
+
 ## Frontend prototype (no backend needed)
 
 The frontend can run standalone against a mock API (synthetic sky, fake
@@ -73,14 +103,19 @@ With "bake overlay into saved frames" enabled, saved frames (and thus the
 timelapse) carry the overlay; keogram and star trails always use the clean
 pre-overlay pixels. Requires `ffmpeg` in PATH on the Pi.
 
-## Deploying to a Raspberry Pi
+Note: `timelapseExtraArgs` (Settings → Processing) is passed verbatim to
+`ffmpeg` — it is an admin-level knob by design; only the authenticated
+admin can set it, and it runs with the service's (unprivileged) rights.
 
+## Dev deploys to a Raspberry Pi
+
+For iterating on a Pi that was set up with the installer above,
 `scripts/deploy-pi.sh` builds the frontend, cross-compiles an
 `aarch64-unknown-linux-gnu.2.36` binary with the UI embedded
-(`--features embed-ui`, via `rust-embed`), and ships it to the Pi over SSH.
-The target is glibc, not musl, because the vendored ZWO ASI SDK
-(`assets/asi/libASICamera2.so`) is a glibc shared object that gets dlopen-ed
-at runtime, and the Pi runs Debian/glibc.
+(`--features embed-ui`), swaps `/usr/local/bin/rskycam` over SSH and
+restarts the `rskycam` systemd service. The target is glibc, not musl,
+because the vendored ZWO ASI SDK (`assets/asi/libASICamera2.so`) is a
+glibc shared object dlopen-ed at runtime.
 
 One-time toolchain setup on the build machine (macOS):
 
@@ -93,33 +128,12 @@ cargo install cargo-zigbuild
 Deploy (defaults to `pi@rpiwhite.local`, override with an argument):
 
 ```bash
-./scripts/deploy-pi.sh                    # deploy to pi@rpiwhite.local
+./scripts/deploy-pi.sh
 ./scripts/deploy-pi.sh pi@other-host.local
 ```
 
-This will:
-
-1. `npm run build` in `frontend/`.
-2. `cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.36 --features embed-ui`.
-3. `scp` the resulting binary to `~/rskycam.new` on the Pi.
-4. Over SSH: kill any running `rskycam`, move the new binary into place,
-   and restart it in the background (`RSKYCAM_DATA=$HOME/rskycam-data`),
-   logging to `~/rskycam.log`.
-
-The Pi process is a plain foreground process under `nohup` — no systemd
-unit yet (that, along with a dedicated user and `/var/lib/rskycam`, is
-planned for a later phase's install script).
-
-Verify it came up:
-
-```bash
-curl -si -X POST http://rpiwhite.local:8080/api/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"pa$$word!0"}'
-# → 204 + Set-Cookie
-```
-
-Then log in at `http://rpiwhite.local:8080` (admin / `pa$$word!0`).
+Changes to the systemd unit or udev rule are not covered — re-run the
+installer for those.
 
 ## Security model (Phase 2)
 
