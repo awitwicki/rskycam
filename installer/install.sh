@@ -25,6 +25,7 @@ main() {
   [ "$(uname -m)" = "aarch64" ] || die "aarch64 only (Raspberry Pi OS 64-bit); this is $(uname -m)"
   command -v systemctl >/dev/null || die "systemd is required"
   command -v apt-get >/dev/null || die "apt-based system required (Raspberry Pi OS / Debian)"
+  [ "$(dpkg --print-architecture)" = "arm64" ] || die "64-bit userland (arm64) required; this is $(dpkg --print-architecture)"
 
   if ! command -v ffmpeg >/dev/null || ! command -v curl >/dev/null; then
     echo "-> installing dependencies (ffmpeg, curl)"
@@ -65,7 +66,7 @@ main() {
   install -d -m 755 "$DOC_DIR"
   install -m 644 "$tmp/LICENSE" "$tmp/ASI-LICENSE" "$DOC_DIR/"
   install -m 644 "$tmp/99-asi.rules" /etc/udev/rules.d/99-asi.rules
-  udevadm control --reload-rules
+  udevadm control --reload-rules || true
   udevadm trigger --attr-match=idVendor=03c3 2>/dev/null || true
   install -m 644 "$tmp/rskycam.service" /etc/systemd/system/rskycam.service
 

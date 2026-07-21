@@ -38,6 +38,8 @@ Pin a version with `sudo RSKYCAM_VERSION=v0.4.0 bash`.
 ```bash
 sudo systemctl disable --now rskycam
 sudo rm /etc/systemd/system/rskycam.service /etc/udev/rules.d/99-asi.rules /usr/local/bin/rskycam
+sudo systemctl daemon-reload
+sudo udevadm control --reload-rules
 sudo rm -r /usr/local/share/doc/rskycam
 sudo rm -r /var/lib/rskycam   # deletes all captured images and config
 sudo userdel rskycam
