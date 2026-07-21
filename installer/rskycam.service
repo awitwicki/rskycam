@@ -1,0 +1,32 @@
+[Unit]
+Description=rskycam all-sky camera
+Documentation=https://github.com/awitwicki/rskycam
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rskycam
+Group=rskycam
+Environment=RSKYCAM_DATA=/var/lib/rskycam
+Environment=RUST_LOG=rskycam=info
+ExecStart=/usr/local/bin/rskycam
+Restart=on-failure
+RestartSec=3
+
+# Hardening. The filesystem is read-only except the data dir and /tmp.
+# PrivateTmp also guarantees the ASI SDK .so the binary extracts to the
+# temp dir is torn down when the service stops (ASI review item M-4).
+# No PrivateDevices: the ZWO camera is /dev/bus/usb (opened via the
+# 0666 grant in 99-asi.rules) and rpicam needs /dev/video*.
+# Group access to video/i2c comes from the rskycam user's supplementary
+# groups (set up conditionally by install.sh), not SupplementaryGroups=,
+# so the unit still starts on systems where the i2c group doesn't exist.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/rskycam
+
+[Install]
+WantedBy=multi-user.target

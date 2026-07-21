@@ -1,0 +1,74 @@
+name: CI
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  embed:
+    # Production build path: SPA embedded into the binary via rust-embed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: frontend
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --features embed-ui
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck all repo shell scripts
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(scripts/*.sh installer/*.sh)
+          echo "checking: ${files[*]}"
+          shellcheck "${files[@]}"
+
+  unit-verify:
+    # systemd-analyze needs the unit's User and ExecStart path to resolve,
+    # so fabricate both before verifying.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify unit file
+        run: |
+          sudo useradd --system rskycam
+          sudo install -m 755 /dev/null /usr/local/bin/rskycam
+          sudo mkdir -p /var/lib/rskycam
+          sudo systemd-analyze verify installer/rskycam.service

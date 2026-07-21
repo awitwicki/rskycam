@@ -55,7 +55,7 @@ fn disk_usage(path: &Path) -> Option<(f64, f64)> {
         let st = nix::sys::statvfs::statvfs(path).ok()?;
         let total = st.blocks() as f64 * st.fragment_size() as f64 / 1e9;
         let used = total - st.blocks_available() as f64 * st.fragment_size() as f64 / 1e9;
-        return Some((used, total));
+        Some((used, total))
     }
     #[cfg(not(target_os = "linux"))]
     {
