@@ -36,6 +36,7 @@ pub struct Status {
     pub system: SystemStatus,
     pub astro: AstroStatus,
     pub camera: Option<crate::capture::CameraCaps>,
+    pub darks_progress: Option<crate::darks::DarksProgress>,
 }
 
 fn astro_status(s: &Settings, now: DateTime<Utc>) -> AstroStatus {
@@ -72,6 +73,7 @@ async fn build_status(state: &AppState) -> Status {
         system,
         astro: astro_status(&s, Utc::now()),
         camera: state.camera_caps.borrow().clone(),
+        darks_progress: *state.darks_progress.borrow(),
     }
 }
 
@@ -298,6 +300,65 @@ pub async fn put_settings(State(state): State<AppState>, Json(new): Json<Setting
     StatusCode::NO_CONTENT.into_response()
 }
 
+pub async fn start_darks_capture(State(state): State<AppState>) -> Response {
+    if state.capture_status.borrow().state == crate::capture::CaptureState::CameraUnavailable {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "camera is currently unavailable",
+        )
+            .into_response();
+    }
+    if state.darks_progress.borrow().is_some() {
+        return (StatusCode::CONFLICT, "a darks sweep is already running").into_response();
+    }
+    match state.darks_cmd.try_send(()) {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Err(_) => (StatusCode::CONFLICT, "a darks sweep is already running").into_response(),
+    }
+}
+
+/// The dimensions the dark library is keyed by: the *actual* captured frame
+/// size (pre-crop, pre-mask), which is what the sweep writes under and what
+/// `process_frame` looks up. Mock always renders its own fixed size and ASI
+/// rounds the requested ROI to valid boundaries, so this routinely differs
+/// from the configured `capture_width`/`capture_height` — those are only the
+/// fallback for the window before the very first frame has arrived.
+fn darks_library_dims(state: &AppState, s: &crate::settings::Settings) -> (u32, u32) {
+    state
+        .latest
+        .borrow()
+        .as_ref()
+        .map(|l| (l.raw_width, l.raw_height))
+        .unwrap_or((s.camera.capture_width, s.camera.capture_height))
+}
+
+pub async fn get_darks(State(state): State<AppState>) -> Json<crate::darks::DarksLibrary> {
+    let s = state.cfg.read().await.settings.clone();
+    let data_dir = state.data_dir.clone();
+    let (width, height) = darks_library_dims(&state, &s);
+    let lib = tokio::task::spawn_blocking(move || {
+        let dir = crate::darks::library_dir(&data_dir, s.camera.driver, width, height);
+        crate::darks::load_manifest(&dir)
+    })
+    .await
+    .expect("darks manifest read is panic-free by design");
+    Json(lib)
+}
+
+pub async fn delete_darks(State(state): State<AppState>) -> Response {
+    let s = state.cfg.read().await.settings.clone();
+    let data_dir = state.data_dir.clone();
+    let (width, height) = darks_library_dims(&state, &s);
+    let result = tokio::task::spawn_blocking(move || {
+        crate::darks::clear_library(&data_dir, s.camera.driver, width, height)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
@@ -404,7 +465,15 @@ mod tests {
             width: 640.0,
             height: 480.0,
         });
-        let (latest, _) = crate::capture::process_frame(&frame, &s, true, None).unwrap();
+        let (latest, _) = crate::capture::process_frame(
+            &frame,
+            &s,
+            &h.state.data_dir,
+            crate::settings::CameraDriver::Mock,
+            true,
+            None,
+        )
+        .unwrap();
         h.latest_tx.send(Some(std::sync::Arc::new(latest))).unwrap();
 
         for (uri, w) in [("/api/latest.jpg", 640u32), ("/api/latest.jpg?raw=1", 1280)] {
@@ -520,7 +589,15 @@ mod tests {
             })
             .unwrap();
         let s = h.state.cfg.read().await.settings.clone();
-        let (latest, _) = crate::capture::process_frame(&frame, &s, true, None).unwrap();
+        let (latest, _) = crate::capture::process_frame(
+            &frame,
+            &s,
+            &h.state.data_dir,
+            crate::settings::CameraDriver::Mock,
+            true,
+            None,
+        )
+        .unwrap();
         h.latest_tx.send(Some(std::sync::Arc::new(latest))).unwrap();
 
         let res = app
@@ -546,6 +623,205 @@ mod tests {
         let text = String::from_utf8(first.to_vec()).unwrap();
         assert!(text.contains("event: frame"), "got: {text}");
         assert!(text.contains("imageUrl"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn darks_capture_start_lists_and_clears() {
+        let h = crate::web::testing::harness();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+
+        let start = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/darks/capture")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(start.status(), StatusCode::ACCEPTED);
+
+        // A second request while a sweep is (simulated as) already running is rejected.
+        h.darks_progress_tx
+            .send(Some(crate::darks::DarksProgress {
+                current: 1,
+                total: 15,
+            }))
+            .unwrap();
+        let again = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/darks/capture")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::CONFLICT);
+        h.darks_progress_tx.send(None).unwrap();
+
+        let listed = get_json(&app, &cookie, "/api/darks").await;
+        assert!(listed["entries"].as_array().unwrap().is_empty());
+
+        let del = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/darks")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// The dark library is keyed by the dimensions the camera *actually*
+    /// captures at, not the configured `captureWidth`/`captureHeight` — those
+    /// routinely differ (mock always renders 1280x960; ASI rounds the ROI to
+    /// valid boundaries). Seeding a library at the frame's dimensions and
+    /// finding it through the API proves the handler follows the frame:
+    /// keying by the configured values (1640x1232 by default) would find
+    /// nothing.
+    #[tokio::test]
+    async fn darks_list_and_delete_key_off_the_captured_frame_dimensions() {
+        let h = crate::web::testing::harness();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+
+        // The frames below come from MockCamera, so key the library by that
+        // driver (the handlers take the driver from settings).
+        let configured = {
+            let s = &mut h.state.cfg.write().await.settings;
+            s.camera.driver = crate::settings::CameraDriver::Mock;
+            (s.camera.capture_width, s.camera.capture_height)
+        };
+        assert_ne!(
+            configured,
+            (1280, 960),
+            "test needs configured != captured dimensions to be meaningful"
+        );
+
+        // Seed a library at the *captured* dimensions, as the sweep would.
+        crate::darks::add_entry(
+            &h.state.data_dir,
+            crate::settings::CameraDriver::Mock,
+            1280,
+            960,
+            20_000_000,
+            16.0,
+            &image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3])),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+
+        // Before any frame has arrived we fall back to the configured size,
+        // so the seeded library is (correctly) not visible yet.
+        let empty = get_json(&app, &cookie, "/api/darks").await;
+        assert!(empty["entries"].as_array().unwrap().is_empty());
+
+        // Publish a frame captured at 1280x960 (what mock really renders).
+        use crate::camera::{Camera, CaptureParams};
+        let frame = crate::camera::mock::MockCamera::new()
+            .capture(CaptureParams {
+                exposure_us: 1_000_000,
+                gain: 4.0,
+            })
+            .unwrap();
+        let s = h.state.cfg.read().await.settings.clone();
+        let (latest, _) = crate::capture::process_frame(
+            &frame,
+            &s,
+            &h.state.data_dir,
+            crate::settings::CameraDriver::Mock,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!((latest.raw_width, latest.raw_height), (1280, 960));
+        h.latest_tx.send(Some(std::sync::Arc::new(latest))).unwrap();
+
+        let listed = get_json(&app, &cookie, "/api/darks").await;
+        let entries = listed["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "got: {listed}");
+        assert_eq!(entries[0]["exposureUs"], 20_000_000u64);
+
+        // DELETE must clear that same library, not the configured-size one.
+        let del = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/darks")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        assert!(!crate::darks::library_dir(
+            &h.state.data_dir,
+            crate::settings::CameraDriver::Mock,
+            1280,
+            960
+        )
+        .exists());
+        let after = get_json(&app, &cookie, "/api/darks").await;
+        assert!(after["entries"].as_array().unwrap().is_empty());
+    }
+
+    /// A sweep request while the camera is down is rejected outright rather
+    /// than queued and silently dropped by the supervisor.
+    #[tokio::test]
+    async fn darks_capture_is_rejected_while_the_camera_is_unavailable() {
+        let h = crate::web::testing::harness();
+        h.status_tx
+            .send(crate::capture::CaptureStatus {
+                state: crate::capture::CaptureState::CameraUnavailable,
+                message: Some("injected".into()),
+                last_frame: None,
+            })
+            .unwrap();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/darks/capture")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn status_includes_darks_progress() {
+        let h = crate::web::testing::harness();
+        h.darks_progress_tx
+            .send(Some(crate::darks::DarksProgress {
+                current: 3,
+                total: 15,
+            }))
+            .unwrap();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let v = get_json(&app, &cookie, "/api/status").await;
+        assert_eq!(v["darksProgress"]["current"], 3);
+        assert_eq!(v["darksProgress"]["total"], 15);
     }
 
     #[test]

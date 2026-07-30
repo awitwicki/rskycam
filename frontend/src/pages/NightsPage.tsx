@@ -37,6 +37,7 @@ export default function NightsPage() {
           <Link key={n.date} to={`/nights/${n.date}`}
             className="overflow-hidden rounded-xl border border-line bg-panel transition hover:border-accent">
             <img src={n.thumbnailUrl} alt={`Night of ${n.date}`}
+              loading="lazy" decoding="async"
               className="aspect-square w-full object-cover" />
             <div className="p-3">
               <div className="font-mono text-sm">{n.date}</div>
@@ -44,7 +45,8 @@ export default function NightsPage() {
               <div className="mt-1.5 flex gap-1">
                 <ArtifactBadge label="K" artifact={n.keogram} />
                 <ArtifactBadge label="S" artifact={n.startrails} />
-                <ArtifactBadge label="T" artifact={n.timelapse} />
+                <ArtifactBadge label="TD" artifact={n.timelapseDay} />
+                <ArtifactBadge label="TN" artifact={n.timelapseNight} />
               </div>
             </div>
           </Link>

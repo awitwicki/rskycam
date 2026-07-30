@@ -118,6 +118,11 @@ export default function DashboardPage() {
               <SysRow label="CPU temp" value={`${sys.cpuTempC.toFixed(0)}°C`}
                 tone={sys.cpuTempC > 80 ? 'danger' : sys.cpuTempC > 70 ? 'warn' : 'default'}
                 pct={sys.cpuTempC} />
+              <SysRow label="CPU load"
+                value={`${sys.cpuLoadAvg5m.toFixed(2)} (${Math.round((sys.cpuLoadAvg5m / sys.cpuCores) * 100)}%)`}
+                tone={sys.cpuLoadAvg5m / sys.cpuCores > 1 ? 'danger'
+                  : sys.cpuLoadAvg5m / sys.cpuCores > 0.7 ? 'warn' : 'default'}
+                pct={(sys.cpuLoadAvg5m / sys.cpuCores) * 100} />
               <SysRow label="RAM"
                 value={`${(sys.ramUsedMb / 1024).toFixed(1)} / ${(sys.ramTotalMb / 1024).toFixed(1)} GB`}
                 pct={(sys.ramUsedMb / sys.ramTotalMb) * 100} />

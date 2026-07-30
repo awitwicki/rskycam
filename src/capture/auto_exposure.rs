@@ -7,8 +7,10 @@ pub struct ExposureLimits {
     pub max_gain: f64,
 }
 
-/// Brightness within +-DEADBAND of the target counts as converged.
-const DEADBAND: f64 = 8.0;
+/// Brightness within +-DEADBAND of the target counts as converged. Wide
+/// enough to absorb real frame-to-frame brightness variance (wind-blown
+/// scenery, drifting cloud, sensor noise) without endlessly re-correcting.
+const DEADBAND: f64 = 15.0;
 /// A clipped sensor hides the true scene brightness, so the measured ratio
 /// badly understates the correction. Above/below these levels the frame is
 /// treated as blown/crushed and corrected by a fixed large factor instead of
@@ -19,36 +21,44 @@ const SAT_CUT: f64 = 0.1; // blown white: cut light to 10% per step
 const BLACK_BOOST: f64 = 10.0; // crushed black: 10x per step
 /// Widest single-step light change, so sensor noise can't fling the loop.
 const MAX_RATIO: f64 = 32.0;
-/// Per-step gain reduction while settling toward the floor (see `settle_gain`).
-const GAIN_SETTLE: f64 = 0.8;
+/// Fraction of the *non-clipped* correction applied per step. A single
+/// frame's measured mean is noisy (real scenery, sensor read noise) — a
+/// full-strength proportional step overshoots the target on every
+/// correction and ping-pongs between two exposures forever instead of
+/// settling. Only applied outside the SAT_HI/SAT_LO escape path, which stays
+/// at full strength so an actually clipped frame still escapes in a handful
+/// of steps.
+const DAMPING: f64 = 0.35;
 
 /// Brightness is close enough to the target — the loop can stop hunting.
 pub fn converged(mean: f64, target: f64) -> bool {
     (mean - target).abs() <= DEADBAND
 }
 
-/// The frame is clipped (blown white or crushed black) and therefore not
-/// worth keeping — the capture loop skips persisting these while it hunts.
-pub fn is_clipped(mean: f64) -> bool {
-    mean >= SAT_HI || mean <= SAT_LO
-}
-
 /// Once brightness is on target, walk gain down toward its floor whenever
-/// exposure has room to grow and hold the light — lower gain means less noise.
-/// One gentle step per call; the capture loop runs this at the full interval,
-/// so it never disturbs live viewing. Exposure compensation assumes a linear
-/// gain (true for the mock; an approximation for real cameras that the
-/// brightness feedback corrects on the next frame). Gain rises are handled by
-/// `next_params`' overflow path, never here.
+/// exposure has room to grow and hold the light — lower gain means less
+/// noise. Drops gain as far as the current exposure headroom affords in one
+/// step (down to the floor outright whenever there's enough room, e.g. a few
+/// ms of exposure by day against a multi-second ceiling) rather than a fixed
+/// fraction per call — the capture loop runs this at the full interval, so a
+/// timid fixed step could take dozens of intervals to reach the floor.
+/// Exposure compensation assumes a linear gain (true for the mock; an
+/// approximation for real cameras that the brightness feedback corrects on
+/// the next frame). Gain rises are handled by `next_params`' overflow path,
+/// never here.
 fn settle_gain(cur: CaptureParams, lim: &ExposureLimits) -> CaptureParams {
     if cur.gain <= lim.min_gain {
         return cur; // already at the floor
     }
-    let new_gain = (cur.gain * GAIN_SETTLE).max(lim.min_gain);
-    let compensated = cur.exposure_us as f64 * (cur.gain / new_gain); // hold the light
-    if compensated > lim.max_exposure_us as f64 {
-        return cur; // no exposure headroom to absorb the drop — keep the gain
+    // The lowest gain the exposure ceiling can afford while holding the same
+    // total light (exposure_us * gain constant): compensated = cur.exposure_us
+    // * (cur.gain / new_gain) <= max_exposure_us solved for new_gain.
+    let min_affordable_gain = (cur.exposure_us as f64 * cur.gain) / lim.max_exposure_us as f64;
+    let new_gain = min_affordable_gain.max(lim.min_gain);
+    if new_gain >= cur.gain {
+        return cur; // no exposure headroom at all to absorb any drop
     }
+    let compensated = cur.exposure_us as f64 * (cur.gain / new_gain);
     CaptureParams {
         exposure_us: (compensated.round() as u64).clamp(lim.min_exposure_us, lim.max_exposure_us),
         gain: new_gain,
@@ -79,6 +89,10 @@ pub fn next_params(
         ratio = ratio.min(SAT_CUT); // clipped white — we know we're at least this over
     } else if mean <= SAT_LO {
         ratio = ratio.max(BLACK_BOOST); // crushed black — at least this under
+    } else {
+        // Not clipped — damp the correction so one noisy/variable reading
+        // doesn't overshoot the target and bounce back and forth forever.
+        ratio = 1.0 + (ratio - 1.0) * DAMPING;
     }
     ratio = ratio.clamp(1.0 / MAX_RATIO, MAX_RATIO);
 
@@ -231,13 +245,16 @@ mod tests {
 
     #[test]
     fn converges_on_a_linear_scene_within_a_few_steps() {
-        // scene: mean = k * exposure_us * gain
+        // scene: mean = k * exposure_us * gain. 12 steps, not 6: DAMPING
+        // trades some convergence speed for immunity to noisy-measurement
+        // oscillation (see damping_settles_into_a_tight_band_...) — still a
+        // handful of steps, not a slow crawl.
         let k = 100.0 / (2_000_000.0 * 4.0);
         let mut cur = CaptureParams {
             exposure_us: 32,
             gain: 1.0,
         };
-        for _ in 0..6 {
+        for _ in 0..12 {
             let mean = (k * cur.exposure_us as f64 * cur.gain).min(255.0);
             cur = next_params(mean, 100.0, cur, &LIM);
         }
@@ -246,6 +263,36 @@ mod tests {
             (final_mean - 100.0).abs() <= DEADBAND,
             "final mean {final_mean}"
         );
+    }
+
+    #[test]
+    fn damping_settles_into_a_tight_band_despite_noisy_measurements() {
+        // Regression test for a real-hardware bug: on the ASI120MM Mini the
+        // measured mean carries real frame-to-frame variance (moving
+        // scenery, sensor noise) on top of what exposure/gain predict. The
+        // undamped correction reacted to each noisy sample at full strength
+        // and ping-ponged exposure between two values roughly 30% apart,
+        // forever (never inside DEADBAND, so never settling onto the full
+        // capture interval). Model the same closed loop (mean depends on
+        // exposure/gain) plus a persistent +-20 measurement offset that
+        // exceeds DEADBAND, and confirm exposure settles into a tight band
+        // instead of continuing to swing widely.
+        let k = 100.0 / (5_000.0 * 16.0);
+        let mut cur = CaptureParams {
+            exposure_us: 5_000,
+            gain: 16.0,
+        };
+        let mut exposures = Vec::new();
+        for i in 0..40 {
+            let true_mean = (k * cur.exposure_us as f64 * cur.gain).min(255.0);
+            let noisy_mean = (true_mean + if i % 2 == 0 { 20.0 } else { -20.0 }).clamp(0.0, 255.0);
+            cur = next_params(noisy_mean, 100.0, cur, &LIM);
+            exposures.push(cur.exposure_us as f64);
+        }
+        let last = &exposures[exposures.len() - 6..];
+        let min = last.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = last.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(max / min < 1.15, "still oscillating widely: {last:?}");
     }
 
     #[test]
@@ -264,12 +311,9 @@ mod tests {
     }
 
     #[test]
-    fn converged_and_clipped_helpers() {
+    fn converged_helper() {
         assert!(converged(100.0, 100.0));
         assert!(converged(107.0, 100.0));
         assert!(!converged(120.0, 100.0));
-        assert!(is_clipped(255.0));
-        assert!(is_clipped(2.0));
-        assert!(!is_clipped(100.0));
     }
 }

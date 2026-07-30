@@ -42,6 +42,9 @@ pub struct AsiControlCaps {
 
 pub const ASI_GAIN: c_int = 0;
 pub const ASI_EXPOSURE: c_int = 1;
+pub const ASI_GAMMA: c_int = 2;
+pub const ASI_BANDWIDTHOVERLOAD: c_int = 6;
+pub const ASI_HIGH_SPEED_MODE: c_int = 14;
 pub const ASI_IMG_RAW8: c_int = 0;
 pub const ASI_EXP_IDLE: c_int = 0;
 pub const ASI_EXP_WORKING: c_int = 1;

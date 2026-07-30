@@ -6,9 +6,24 @@ const img = (url: string) => <img src={url} alt="artifact" />
 
 describe('ArtifactCard', () => {
   it('ready: renders children and a download link', () => {
-    render(<ArtifactCard title="Keogram" artifact={{ state: 'ready', url: '/k.jpg' }}>{img}</ArtifactCard>)
+    render(
+      <ArtifactCard title="Keogram" artifact={{ state: 'ready', url: '/k.jpg', sizeBytes: 640_000 }}>
+        {img}
+      </ArtifactCard>,
+    )
     expect(screen.getByAltText('artifact')).toHaveAttribute('src', '/k.jpg')
     expect(screen.getByRole('link', { name: /download/i })).toHaveAttribute('href', '/k.jpg')
+    expect(screen.queryByText(/mb|kb/i)).not.toBeInTheDocument()
+  })
+
+  it('ready with showSize: also renders the formatted file size', () => {
+    render(
+      <ArtifactCard title="Night timelapse" artifact={{ state: 'ready', url: '/t.mp4', sizeBytes: 12_582_912 }}
+        showSize>
+        {img}
+      </ArtifactCard>,
+    )
+    expect(screen.getByText('12.0 MB')).toBeInTheDocument()
   })
 
   it('generating: shows progress text', () => {

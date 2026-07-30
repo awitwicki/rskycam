@@ -218,7 +218,10 @@ pub fn format_exposure(us: u64) -> String {
             format!("{:.1} s", s)
         }
     } else {
-        format!("1/{} s", (1.0 / s).round() as u64)
+        let trimmed = format!("{s:.6}");
+        let trimmed = trimmed.trim_end_matches('0');
+        let trimmed = trimmed.trim_end_matches('.');
+        format!("{trimmed} s")
     }
 }
 
@@ -470,6 +473,7 @@ mod tests {
     fn format_exposure_covers_both_ranges() {
         assert_eq!(format_exposure(30_000_000), "30 s");
         assert_eq!(format_exposure(2_500_000), "2.5 s");
-        assert_eq!(format_exposure(4_000), "1/250 s");
+        assert_eq!(format_exposure(4_000), "0.004 s");
+        assert_eq!(format_exposure(32), "0.000032 s");
     }
 }

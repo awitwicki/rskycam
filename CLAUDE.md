@@ -69,3 +69,7 @@ aarch64-unknown-linux-gnu.2.36 via cargo-zigbuild with `--features embed-ui`
 installs/restarts the `rskycam` systemd unit on the Pi and verifies it came
 up. Target: `pi@rpiwhite.local` (Pi 4B 2GB, imx219 NoIR on CSI, I2C disabled,
 data dir `/home/pi/rskycam-data`). Logs: `journalctl -u rskycam`.
+
+`rpiwhite.local` is a test/dev device, not a protected production box —
+after making a change (backend or frontend), run `./scripts/deploy-pi.sh`
+automatically to keep it current. No need to ask first each time.

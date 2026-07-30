@@ -1,7 +1,7 @@
 import type { ApiClient } from '../client'
 import type {
-  ApiEvent, ArtifactState, FrameInfo, FrameMeta, LightgraphData, NightDetail,
-  NightSummary, OverlayGeometry, OverlayRequest, Settings, Status, TextFieldKind,
+  ApiEvent, ArtifactState, DarkEntry, DarksLibrary, FrameInfo, FrameMeta, LightgraphData,
+  NightDetail, NightSummary, OverlayGeometry, OverlayRequest, Settings, Status, TextFieldKind,
 } from '../types'
 import {
   altitudeOf, moonEquatorial, moonIllumination, sunEquatorial,
@@ -22,8 +22,8 @@ export function defaultSettings(): Settings {
     camera: {
       driver: 'mock', autoExposure: true, targetBrightness: 100,
       exposureUsMin: 32, exposureUsMax: 60_000_000, gainMin: 0, gainMax: 300,
-      manualExposureUs: 30_000_000, manualGain: 250, intervalSec: 60, captureDuringDay: false,
-      captureWidth: 1640, captureHeight: 1232,
+      manualExposureUs: 30_000_000, manualGain: 250, intervalSecDay: 120, intervalSecNight: 60,
+      captureDuringDay: false, captureWidth: 1640, captureHeight: 1232,
     },
     image: { maskMode: 'none', crop: null },
     location: { latitudeDeg: 50.45, longitudeDeg: 30.52 },
@@ -39,8 +39,9 @@ export function defaultSettings(): Settings {
       ],
       bakeIntoSavedFrames: false,
     },
-    processing: { keogram: true, startrails: true, startrailsBrightnessLimit: 35, timelapse: true, timelapseFps: 25, timelapseExtraArgs: '' },
+    processing: { keogram: true, startrails: true, startrailsBrightnessLimit: 35, timelapseDay: true, timelapseNight: true, timelapseFps: 25, timelapseExtraArgs: '' },
     storage: { framesRetentionDays: 14, artifactsRetentionDays: 60 },
+    darks: { enabled: false, minGainToApply: 15, minExposureUsToApply: 10_000_000 },
   }
 }
 
@@ -56,11 +57,15 @@ export class MockApi implements ApiClient {
   private readonly sample: HTMLImageElement | null = null
   private readonly startedAt = Date.now()
   private cpuTemp = 52
+  private cpuLoad = 1.8
   private lastFrameTime: Date | null = null
   private lastFrameUrl: string | null = null
   private lastRawUrl: string | null = null
   private nightList: NightSummary[] | null = null
   private readonly nightFrames = new Map<string, FrameInfo[]>()
+  private darksEntries: DarkEntry[] = []
+  private darksProgress: { current: number; total: number } | null = null
+  private darksTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(opts: { renderFrame?: (time: Date, size: number) => string } = {}) {
     if (!opts.renderFrame && typeof Image !== 'undefined') {
@@ -152,6 +157,7 @@ export class MockApi implements ApiClient {
 
   async getStatus(): Promise<Status> {
     this.cpuTemp = Math.min(72, Math.max(42, this.cpuTemp + (Math.random() - 0.5) * 1.5))
+    this.cpuLoad = Math.min(4, Math.max(0.2, this.cpuLoad + (Math.random() - 0.5) * 0.3))
     return {
       astro: this.astroNow(),
       capture: { state: 'capturing', lastFrame: this.frameMeta(new Date()) },
@@ -169,6 +175,8 @@ export class MockApi implements ApiClient {
       system: {
         model: 'Raspberry Pi 4 Model B Rev 1.4',
         cpuTempC: this.cpuTemp,
+        cpuLoadAvg5m: this.cpuLoad,
+        cpuCores: 4,
         ramUsedMb: 1210 + Math.round(Math.random() * 80),
         ramTotalMb: 3906,
         diskUsedGb: 41.2,
@@ -177,6 +185,7 @@ export class MockApi implements ApiClient {
         undervoltageNow: false,
         undervoltageSinceBoot: true,
       },
+      darksProgress: this.darksProgress,
     }
   }
 
@@ -260,18 +269,32 @@ export class MockApi implements ApiClient {
       d.setDate(d.getDate() - i)
       d.setHours(22, 0, 0, 0)
       const keogram: ArtifactState =
-        i === 4 ? { state: 'disabled' } : { state: 'ready', url: renderKeogram(720, 220, i) }
-      const timelapse: ArtifactState =
+        i === 4
+          ? { state: 'disabled' }
+          : { state: 'ready', url: renderKeogram(720, 220, i), sizeBytes: 640_000 }
+      const timelapseNight: ArtifactState =
         i === 1 ? { state: 'generating' }
         : i === 2 ? { state: 'error', message: 'ffmpeg exited with code 1' }
-        : { state: 'ready', url: '/mock/timelapse.mp4' }
+        : { state: 'ready', url: '/mock/timelapse.mp4', sizeBytes: 22_000_000 }
+      const timelapseDay: ArtifactState =
+        i === 5
+          ? { state: 'disabled' }
+          : { state: 'ready', url: '/mock/timelapse.mp4', sizeBytes: 9_500_000 }
+      const frameCount = 640 - i * 7
+      const framesSizeBytes = frameCount * 260_000 // ~260KB per raw frame
+      const artifactBytes = [keogram, timelapseNight, timelapseDay]
+        .map((a) => (a.state === 'ready' ? a.sizeBytes : 0))
+        .reduce((a, b) => a + b, 1_800_000) // + startrails, always ready below
       out.push({
         date: localDateStr(d),
-        frameCount: 640 - i * 7,
+        frameCount,
+        framesSizeBytes,
+        totalSizeBytes: framesSizeBytes + artifactBytes,
         thumbnailUrl: this.renderFrame(d, 240),
         keogram,
-        startrails: { state: 'ready', url: renderStartrails(720, 100 + i) },
-        timelapse,
+        startrails: { state: 'ready', url: renderStartrails(720, 100 + i), sizeBytes: 1_800_000 },
+        timelapseDay,
+        timelapseNight,
       })
     }
     this.nightList = out
@@ -293,6 +316,7 @@ export class MockApi implements ApiClient {
         return {
           timestamp: t.toISOString(),
           url: this.renderFrame(t, 480),
+          thumbUrl: this.renderFrame(t, 100),
           exposureUs: 30_000_000,
           gain: 250,
         }
@@ -305,12 +329,44 @@ export class MockApi implements ApiClient {
   async rebuildNight(date: string): Promise<void> {
     const n = this.buildList().find((x) => x.date === date)
     if (!n) throw new Error(`night not found: ${date}`)
-    n.timelapse = { state: 'generating' }
+    n.timelapseDay = { state: 'generating' }
+    n.timelapseNight = { state: 'generating' }
   }
 
   async deleteNight(date: string): Promise<void> {
     const list = this.buildList()
     if (!list.some((x) => x.date === date)) throw new Error(`night not found: ${date}`)
     this.nightList = list.filter((x) => x.date !== date)
+  }
+
+  // ── darks ──
+  async startDarksCapture(): Promise<void> {
+    if (this.darksProgress) throw new Error('a darks sweep is already running')
+    const total = 15
+    this.darksProgress = { current: 0, total }
+    this.darksTimer = setInterval(() => {
+      if (!this.darksProgress) return
+      this.darksProgress.current += 1
+      if (this.darksProgress.current >= total) {
+        if (this.darksTimer) clearInterval(this.darksTimer)
+        this.darksTimer = null
+        const now = new Date().toISOString()
+        this.darksEntries = [500_000, 2_000_000, 8_000_000, 20_000_000, 60_000_000].flatMap(
+          (exposureUs) =>
+            [1, 8, 16].map((gain) => ({
+              exposureUs, gain, file: `dark-${exposureUs}-${gain}.png`, capturedAt: now,
+            })),
+        )
+        this.darksProgress = null
+      }
+    }, 200)
+  }
+
+  async getDarksLibrary(): Promise<DarksLibrary> {
+    return { entries: this.darksEntries }
+  }
+
+  async clearDarks(): Promise<void> {
+    this.darksEntries = []
   }
 }

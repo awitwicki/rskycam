@@ -104,14 +104,21 @@ pub fn spawn_retention(cfg: Arc<RwLock<ConfigFile>>, data_dir: PathBuf) {
         tick.tick().await; // the first tick fires immediately — consume it
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         loop {
-            let storage = cfg.read().await.settings.storage;
+            let (storage, location) = {
+                let g = cfg.read().await;
+                (g.settings.storage, g.settings.location)
+            };
             let dd = data_dir.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 let images = dd.join("images");
                 let dates = list_night_dates(&images);
                 let actions = plan(
                     &dates,
-                    crate::capture::night_date(chrono::Local::now()),
+                    crate::capture::night_date(
+                        chrono::Local::now(),
+                        location.latitude_deg,
+                        location.longitude_deg,
+                    ),
                     storage.frames_retention_days,
                     storage.artifacts_retention_days,
                 );

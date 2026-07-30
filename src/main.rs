@@ -1,6 +1,7 @@
 mod auth;
 mod camera;
 mod capture;
+mod darks;
 mod overlay;
 mod processing;
 mod sensors;
@@ -53,6 +54,8 @@ async fn main() -> anyhow::Result<()> {
         latest: channels.latest.clone(),
         capture_status: channels.status.clone(),
         camera_caps: channels.camera_caps.clone(),
+        darks_cmd: channels.darks_cmd.clone(),
+        darks_progress: channels.darks_progress.clone(),
         key,
         data_dir,
         processing: processing.clone(),

@@ -120,4 +120,99 @@ describe('SettingsPage', () => {
     await screen.findByText(/saved/i)
     expect((await api.getSettings()).processing.timelapseExtraArgs).toBe('-preset veryfast')
   })
+
+  it('shows the confirm dialog and starts a sweep on confirm', async () => {
+    render(<SettingsPage />)
+    await screen.findByLabelText(/latitude/i)
+    const spy = vi.spyOn(api, 'startDarksCapture')
+    await userEvent.click(screen.getByRole('button', { name: /capture dark sweep/i }))
+    expect(screen.getByRole('dialog', { name: /confirm dark sweep/i })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /^start sweep$/i }))
+    expect(spy).toHaveBeenCalled()
+  })
+
+  it('disables the sweep button while the camera is unavailable', async () => {
+    // The backend rejects a sweep with 503 in this state, so the UI must not
+    // offer it in the first place.
+    const base = await api.getStatus()
+    vi.spyOn(api, 'getStatus').mockResolvedValue({
+      ...base,
+      capture: { state: 'camera_unavailable', message: 'no camera' },
+    })
+    render(<SettingsPage />)
+    await screen.findByLabelText(/latitude/i)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /capture dark sweep/i })).toBeDisabled(),
+    )
+  })
+
+  it('exports the current settings as a downloadable JSON file', async () => {
+    render(<SettingsPage />)
+    await screen.findByLabelText(/latitude/i)
+
+    let captured: Blob | null = null
+    const url = 'blob:mock-url'
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((obj: Blob | MediaSource) => {
+      captured = obj as Blob
+      return url
+    })
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+    await userEvent.click(screen.getByRole('button', { name: /^export$/i }))
+
+    expect(clickSpy).toHaveBeenCalledTimes(1)
+    expect(revoke).toHaveBeenCalledWith(url)
+    expect(captured).not.toBeNull()
+    const text = await (captured as unknown as Blob).text()
+    const parsed = JSON.parse(text)
+    expect(parsed.location.latitudeDeg).toBe(50.45)
+    expect(parsed.camera.driver).toBe('mock')
+  })
+
+  it('imports a settings file into the draft, applied only after Save', async () => {
+    render(<SettingsPage />)
+    const lat = await screen.findByLabelText(/latitude/i)
+    expect(lat).toHaveValue(50.45)
+
+    const exported = await api.getSettings()
+    const imported = { ...exported, location: { ...exported.location, latitudeDeg: 12.34 } }
+    const file = new File([JSON.stringify(imported)], 'rskycam-settings.json', {
+      type: 'application/json',
+    })
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    await userEvent.upload(input, file)
+
+    await waitFor(() => expect(lat).toHaveValue(12.34))
+    // Not yet persisted — only loaded into the draft for review.
+    expect((await api.getSettings()).location.latitudeDeg).toBe(50.45)
+
+    await userEvent.click(screen.getByRole('button', { name: /^save settings$/i }))
+    await screen.findByText(/saved/i)
+    expect((await api.getSettings()).location.latitudeDeg).toBe(12.34)
+  })
+
+  it('rejects an import file that is not a valid settings shape', async () => {
+    render(<SettingsPage />)
+    await screen.findByLabelText(/latitude/i)
+
+    const file = new File([JSON.stringify({ foo: 'bar' })], 'garbage.json', {
+      type: 'application/json',
+    })
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    await userEvent.upload(input, file)
+
+    expect(await screen.findByText(/import failed/i)).toBeInTheDocument()
+    expect((await api.getSettings()).location.latitudeDeg).toBe(50.45) // untouched
+  })
+
+  it('lists captured darks and can clear them', async () => {
+    await api.startDarksCapture()
+    await new Promise((r) => setTimeout(r, 3500)) // let the mock sweep finish
+    render(<SettingsPage />)
+    // Five exposure stops each get a gain-16 dark, so multiple entries match; wait for them all.
+    await screen.findAllByText(/gain 16\.00/i)
+    await userEvent.click(screen.getByRole('button', { name: /clear darks/i }))
+    await waitFor(() => expect(screen.getByText(/no darks captured yet/i)).toBeInTheDocument())
+  }, 10000)
 })

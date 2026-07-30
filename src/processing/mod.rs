@@ -13,13 +13,14 @@ use image::{ImageFormat, RgbImage};
 use serde::Deserialize;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::settings::{ConfigFile, ProcessingSettings};
+use crate::settings::{ConfigFile, LocationSettings, ProcessingSettings};
 
 pub struct NightFrame {
     pub date: NaiveDate,
     pub file: String,
     pub image: RgbImage,
     pub mean: f64,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 pub struct ProcessingConfig {
@@ -47,17 +48,35 @@ struct NightState {
 #[derive(Deserialize)]
 struct FrameLine {
     file: String,
+    timestamp: String,
 }
 
 fn night_dir(data_dir: &Path, date: NaiveDate) -> PathBuf {
     data_dir.join("images").join(date.to_string())
 }
 
+/// Whether a frame captured at `timestamp` falls in the dark part of the
+/// night (sun below civil twilight), per the same check the capture loop
+/// itself uses for day/night gating.
+fn frame_is_night(timestamp: chrono::DateTime<chrono::Utc>, location: &LocationSettings) -> bool {
+    crate::capture::is_night(timestamp, location.latitude_deg, location.longitude_deg)
+}
+
 /// Feed one decoded frame into the accumulators per the current settings.
 /// `file` is the frame's filename — its embedded timestamp becomes the
-/// keogram column's position on the hour scale.
-fn accumulate(st: &mut NightState, img: &RgbImage, mean: f64, file: &str, p: &ProcessingSettings) {
-    if p.keogram {
+/// keogram column's position on the hour scale. Daytime frames wash out the
+/// keogram (a night-sky visualization), so only night-classified frames are
+/// added to it; startrails keeps its own brightness-limit filter instead
+/// and is unaffected by `is_night_frame`.
+fn accumulate(
+    st: &mut NightState,
+    img: &RgbImage,
+    mean: f64,
+    file: &str,
+    is_night_frame: bool,
+    p: &ProcessingSettings,
+) {
+    if p.keogram && is_night_frame {
         st.keogram.add_frame(img, keogram::frame_time(file));
     }
     if p.startrails {
@@ -117,7 +136,12 @@ fn write_artifacts(dir: &Path, st: &NightState, p: &ProcessingSettings) {
 
 /// Rebuild a night's accumulators from the frames already on disk.
 /// Blocking — call from spawn_blocking.
-fn replay_night(data_dir: &Path, date: NaiveDate, p: &ProcessingSettings) -> NightState {
+fn replay_night(
+    data_dir: &Path,
+    date: NaiveDate,
+    p: &ProcessingSettings,
+    location: &LocationSettings,
+) -> NightState {
     let dir = night_dir(data_dir, date);
     let mut st = NightState {
         date,
@@ -141,36 +165,128 @@ fn replay_night(data_dir: &Path, date: NaiveDate, p: &ProcessingSettings) -> Nig
         };
         let img = img.to_rgb8();
         let mean = crate::camera::mean_brightness(&img);
-        accumulate(&mut st, &img, mean, &fl.file, p);
+        // A malformed/legacy timestamp defaults to "night" (include it) —
+        // dropping it from the keogram entirely would be a worse regression
+        // than an occasional misclassification.
+        let is_night_frame = fl
+            .timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .map(|ts| frame_is_night(ts, location))
+            .unwrap_or(true);
+        accumulate(&mut st, &img, mean, &fl.file, is_night_frame, p);
         st.last_file = fl.file;
     }
     write_artifacts(&dir, &st, p);
     st
 }
 
-/// Run the dawn finalization for a finished night: the timelapse.
-/// Blocking — call from spawn_blocking.
-fn finalize_night(data_dir: &Path, date: NaiveDate, p: &ProcessingSettings, ffmpeg: &Path) {
-    let dir = night_dir(data_dir, date);
-    if !p.timelapse {
+/// Splits a night's frames (from frames.jsonl) into day/night absolute
+/// paths under `frames/`, in chronological order, for the timelapse
+/// concat-demuxer lists. Same malformed-timestamp fallback as replay_night.
+fn classify_frames_for_timelapse(
+    night_dir: &Path,
+    location: &LocationSettings,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut day = Vec::new();
+    let mut night = Vec::new();
+    let Ok(raw) = std::fs::read_to_string(night_dir.join("frames.jsonl")) else {
+        return (day, night);
+    };
+    let frames_dir = night_dir.join("frames");
+    for line in raw.lines() {
+        let Ok(fl) = serde_json::from_str::<FrameLine>(line) else {
+            continue;
+        };
+        let path = frames_dir.join(&fl.file);
+        if !path.is_file() {
+            continue; // pruned or unreadable — skip, matching replay_night
+        }
+        let is_night_frame = fl
+            .timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .map(|ts| frame_is_night(ts, location))
+            .unwrap_or(true);
+        if is_night_frame {
+            night.push(path);
+        } else {
+            day.push(path);
+        }
+    }
+    (day, night)
+}
+
+/// Run the dawn finalization for a finished night: the day and/or night
+/// timelapse, per settings. Blocking — call from spawn_blocking.
+fn finalize_night(
+    data_dir: &Path,
+    date: NaiveDate,
+    p: &ProcessingSettings,
+    location: &LocationSettings,
+    ffmpeg: &Path,
+) {
+    if !p.timelapse_day && !p.timelapse_night {
         return;
     }
+    let dir = night_dir(data_dir, date);
+    let (day_frames, night_frames) = classify_frames_for_timelapse(&dir, location);
+
     let mut progress = status::load(&dir);
-    progress.timelapse = Some(status::ArtifactProgress::Generating);
+    if p.timelapse_day {
+        progress.timelapse_day = Some(status::ArtifactProgress::Generating);
+    }
+    if p.timelapse_night {
+        progress.timelapse_night = Some(status::ArtifactProgress::Generating);
+    }
     if let Err(e) = status::save(&dir, &progress) {
         tracing::error!("writing {}: {e:#}", status::STATUS_FILE);
     }
-    let result = timelapse::run_timelapse(ffmpeg, &dir, p.timelapse_fps, &p.timelapse_extra_args);
-    progress.timelapse = match result {
-        Ok(()) => {
-            tracing::info!("timelapse for {date} done");
-            None
-        }
-        Err(e) => {
-            tracing::error!("timelapse for {date} failed: {e}");
-            Some(status::ArtifactProgress::Error { message: e })
-        }
-    };
+
+    if p.timelapse_day {
+        let result = timelapse::run_timelapse(
+            ffmpeg,
+            &dir,
+            "timelapse-day.mp4",
+            &day_frames,
+            p.timelapse_fps,
+            &p.timelapse_extra_args,
+        );
+        progress.timelapse_day = match result {
+            Ok(()) => {
+                tracing::info!(
+                    "day timelapse for {date} done ({} frames)",
+                    day_frames.len()
+                );
+                None
+            }
+            Err(e) => {
+                tracing::error!("day timelapse for {date} failed: {e}");
+                Some(status::ArtifactProgress::Error { message: e })
+            }
+        };
+    }
+    if p.timelapse_night {
+        let result = timelapse::run_timelapse(
+            ffmpeg,
+            &dir,
+            "timelapse-night.mp4",
+            &night_frames,
+            p.timelapse_fps,
+            &p.timelapse_extra_args,
+        );
+        progress.timelapse_night = match result {
+            Ok(()) => {
+                tracing::info!(
+                    "night timelapse for {date} done ({} frames)",
+                    night_frames.len()
+                );
+                None
+            }
+            Err(e) => {
+                tracing::error!("night timelapse for {date} failed: {e}");
+                Some(status::ArtifactProgress::Error { message: e })
+            }
+        };
+    }
     if let Err(e) = status::save(&dir, &progress) {
         tracing::error!("writing {}: {e:#}", status::STATUS_FILE);
     }
@@ -204,9 +320,9 @@ pub fn spawn_processing(
                         tracing::debug!("frame for finalized night {} dropped from artifacts", frame.date);
                         continue;
                     }
-                    let p = {
+                    let (p, location) = {
                         let g = cfg.read().await;
-                        g.settings.processing.clone()
+                        (g.settings.processing.clone(), g.settings.location)
                     };
                     let dd = data_dir.clone();
                     match state.take() {
@@ -215,10 +331,11 @@ pub fn spawn_processing(
                                 state = Some(st); // duplicate/older than replay — skip
                                 continue;
                             }
+                            let is_night_frame = frame_is_night(frame.timestamp, &location);
                             // Move the accumulators through spawn_blocking and back.
                             let joined = tokio::task::spawn_blocking(move || {
                                 let mut st = st;
-                                accumulate(&mut st, &frame.image, frame.mean, &frame.file, &p);
+                                accumulate(&mut st, &frame.image, frame.mean, &frame.file, is_night_frame, &p);
                                 st.last_file = frame.file;
                                 write_artifacts(&night_dir(&dd, st.date), &st, &p);
                                 st
@@ -240,9 +357,9 @@ pub fn spawn_processing(
                             let ffmpeg = pc.ffmpeg.clone();
                             let joined = tokio::task::spawn_blocking(move || {
                                 if let Some(prev) = other {
-                                    finalize_night(&dd, prev.date, &p, &ffmpeg);
+                                    finalize_night(&dd, prev.date, &p, &location, &ffmpeg);
                                 }
-                                replay_night(&dd, frame.date, &p)
+                                replay_night(&dd, frame.date, &p, &location)
                             })
                             .await;
                             match joined {
@@ -275,7 +392,10 @@ pub fn spawn_processing(
                 // excluding the open night from rebuild.
                 maybe_cmd = commands_rx.recv(), if pending_rebuild.is_none() => {
                     let Some(Command::Rebuild { date }) = maybe_cmd else { break };
-                    let p = cfg.read().await.settings.processing.clone();
+                    let (p, location) = {
+                        let g = cfg.read().await;
+                        (g.settings.processing.clone(), g.settings.location)
+                    };
                     let dd = data_dir.clone();
                     let ffmpeg = pc.ffmpeg.clone();
                     let dir = night_dir(&dd, date);
@@ -284,15 +404,16 @@ pub fn spawn_processing(
                     let mut progress = status::load(&dir);
                     if p.keogram { progress.keogram = Some(status::ArtifactProgress::Generating); }
                     if p.startrails { progress.startrails = Some(status::ArtifactProgress::Generating); }
-                    if p.timelapse { progress.timelapse = Some(status::ArtifactProgress::Generating); }
+                    if p.timelapse_day { progress.timelapse_day = Some(status::ArtifactProgress::Generating); }
+                    if p.timelapse_night { progress.timelapse_night = Some(status::ArtifactProgress::Generating); }
                     if let Err(e) = status::save(&dir, &progress) {
                         tracing::error!("writing {}: {e:#}", status::STATUS_FILE);
                     }
                     // Run the replay+ffmpeg off the select loop so live frames
                     // and the dawn tick keep flowing while it's in flight.
                     pending_rebuild = Some(tokio::task::spawn_blocking(move || {
-                        let st = replay_night(&dd, date, &p); // clears keogram/startrails flags
-                        finalize_night(&dd, date, &p, &ffmpeg); // timelapse + its flag
+                        let st = replay_night(&dd, date, &p, &location); // clears keogram/startrails flags
+                        finalize_night(&dd, date, &p, &location, &ffmpeg); // timelapses + their flags
                         st
                     }));
                 }
@@ -325,8 +446,11 @@ pub fn spawn_processing(
                         loc.latitude_deg,
                         loc.longitude_deg,
                     );
-                    let date_moved =
-                        crate::capture::night_date(chrono::Local::now()) != st.date;
+                    let date_moved = crate::capture::night_date(
+                        chrono::Local::now(),
+                        loc.latitude_deg,
+                        loc.longitude_deg,
+                    ) != st.date;
                     if now_night && !date_moved {
                         continue; // night still running
                     }
@@ -336,7 +460,7 @@ pub fn spawn_processing(
                     let dd = data_dir.clone();
                     let ffmpeg = pc.ffmpeg.clone();
                     if let Err(e) = tokio::task::spawn_blocking(move || {
-                        finalize_night(&dd, date, &p, &ffmpeg)
+                        finalize_night(&dd, date, &p, &loc, &ffmpeg)
                     })
                     .await
                     {
@@ -364,12 +488,31 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-ffmpeg")
     }
 
+    // Matches Settings::default().location — see night_ts/day_ts below.
+    const LAT: f64 = 50.45;
+    const LON: f64 = 30.52;
+
     fn test_cfg() -> Arc<RwLock<crate::settings::ConfigFile>> {
         Arc::new(RwLock::new(crate::settings::ConfigFile {
             version: 1,
             password_hash: "h".into(),
             settings: crate::settings::Settings::default(),
         }))
+    }
+
+    /// A UTC timestamp on `date` that is solidly night at the default test
+    /// location (lat 50.45, lon 30.52 — see `Settings::default`): local
+    /// solar midnight there is ~22:00 UTC, with the sun ~18° below the
+    /// horizon in mid-July — comfortably past the -6° civil-twilight
+    /// threshold either side of that hour.
+    fn night_ts(date: &str, hh: u32, mm: u32) -> String {
+        format!("{date}T{hh:02}:{mm:02}:00.000Z")
+    }
+
+    /// A UTC timestamp on `date` that is solidly day at the same location
+    /// (local solar noon there is ~10:00 UTC, sun near its highest point).
+    fn day_ts(date: &str) -> String {
+        format!("{date}T10:00:00.000Z")
     }
 
     /// Write a frame to disk + jsonl the way the capture loop does, and
@@ -380,6 +523,7 @@ mod tests {
         date: &str,
         file: &str,
         color: [u8; 3],
+        timestamp: &str,
     ) -> NightFrame {
         let img = RgbImage::from_pixel(8, 6, Rgb(color));
         let night = data_dir.join("images").join(date);
@@ -395,7 +539,7 @@ mod tests {
         writeln!(
             f,
             "{}",
-            serde_json::json!({"timestamp": "t", "file": file, "exposureUs": 1, "gain": 1.0})
+            serde_json::json!({"timestamp": timestamp, "file": file, "exposureUs": 1, "gain": 1.0})
         )
         .unwrap();
         NightFrame {
@@ -403,6 +547,7 @@ mod tests {
             file: file.to_string(),
             image: img,
             mean: crate::camera::mean_brightness(&RgbImage::from_pixel(8, 6, Rgb(color))),
+            timestamp: timestamp.parse().expect("valid test timestamp"),
         }
     }
 
@@ -423,7 +568,7 @@ mod tests {
     async fn frames_grow_keogram_and_startrails_on_disk() {
         let dir = tempfile::TempDir::new().unwrap();
         let cfg = test_cfg();
-        let date = crate::capture::night_date(chrono::Local::now()).to_string();
+        let date = crate::capture::night_date(chrono::Local::now(), LAT, LON).to_string();
         let h = spawn_processing(
             cfg,
             dir.path().to_path_buf(),
@@ -434,14 +579,26 @@ mod tests {
         );
         let night = dir.path().join("images").join(&date);
 
-        let f1 = seed_frame(dir.path(), &date, "20260716-220000.jpg", [10, 10, 10]);
+        let f1 = seed_frame(
+            dir.path(),
+            &date,
+            "20260716-220000.jpg",
+            [10, 10, 10],
+            &night_ts(&date, 22, 0),
+        );
         h.frames.send(f1).await.unwrap();
         wait_for("keogram after first frame", || {
             night.join("keogram.jpg").is_file()
         })
         .await;
 
-        let f2 = seed_frame(dir.path(), &date, "20260716-220100.jpg", [30, 30, 30]);
+        let f2 = seed_frame(
+            dir.path(),
+            &date,
+            "20260716-220100.jpg",
+            [30, 30, 30],
+            &night_ts(&date, 22, 1),
+        );
         h.frames.send(f2).await.unwrap();
         wait_for("keogram grows to 2 columns", || {
             image::open(night.join("keogram.jpg"))
@@ -456,14 +613,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_covers_frames_persisted_before_startup() {
-        // Two frames already on disk (e.g. rskycam restarted mid-night); the
-        // tap only delivers the third. The keogram must still have 3 columns.
+    async fn daytime_frames_are_excluded_from_the_keogram_but_not_startrails() {
         let dir = tempfile::TempDir::new().unwrap();
         let cfg = test_cfg();
-        let date = crate::capture::night_date(chrono::Local::now()).to_string();
-        seed_frame(dir.path(), &date, "20260716-220000.jpg", [10, 10, 10]);
-        seed_frame(dir.path(), &date, "20260716-220100.jpg", [20, 20, 20]);
+        let date = crate::capture::night_date(chrono::Local::now(), LAT, LON).to_string();
         let h = spawn_processing(
             cfg,
             dir.path().to_path_buf(),
@@ -472,7 +625,79 @@ mod tests {
                 dawn_check: std::time::Duration::from_secs(3600),
             },
         );
-        let f3 = seed_frame(dir.path(), &date, "20260716-220200.jpg", [30, 30, 30]);
+        let night = dir.path().join("images").join(&date);
+
+        // Dim, same as the "night" frame below: only the timestamp (daytime)
+        // distinguishes this frame — a bright color would also trip
+        // startrails' own separate brightness-limit skip, conflating that
+        // mechanism with the one under test here.
+        let day = seed_frame(
+            dir.path(),
+            &date,
+            "20260716-100000.jpg",
+            [10, 10, 10],
+            &day_ts(&date),
+        );
+        h.frames.send(day).await.unwrap();
+        wait_for("startrails after the (daytime) first frame", || {
+            night.join("startrails.jpg").is_file()
+        })
+        .await;
+        // The daytime frame must not have started the keogram.
+        assert!(!night.join("keogram.jpg").exists());
+
+        let night_frame = seed_frame(
+            dir.path(),
+            &date,
+            "20260716-220000.jpg",
+            [10, 10, 10],
+            &night_ts(&date, 22, 0),
+        );
+        h.frames.send(night_frame).await.unwrap();
+        wait_for("keogram appears once a night frame lands", || {
+            image::open(night.join("keogram.jpg"))
+                .map(|i| i.width() == 1) // only the night frame, not the day one
+                .unwrap_or(false)
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn replay_covers_frames_persisted_before_startup() {
+        // Two frames already on disk (e.g. rskycam restarted mid-night); the
+        // tap only delivers the third. The keogram must still have 3 columns.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = test_cfg();
+        let date = crate::capture::night_date(chrono::Local::now(), LAT, LON).to_string();
+        seed_frame(
+            dir.path(),
+            &date,
+            "20260716-220000.jpg",
+            [10, 10, 10],
+            &night_ts(&date, 22, 0),
+        );
+        seed_frame(
+            dir.path(),
+            &date,
+            "20260716-220100.jpg",
+            [20, 20, 20],
+            &night_ts(&date, 22, 1),
+        );
+        let h = spawn_processing(
+            cfg,
+            dir.path().to_path_buf(),
+            ProcessingConfig {
+                ffmpeg: fixture_ffmpeg(),
+                dawn_check: std::time::Duration::from_secs(3600),
+            },
+        );
+        let f3 = seed_frame(
+            dir.path(),
+            &date,
+            "20260716-220200.jpg",
+            [30, 30, 30],
+            &night_ts(&date, 22, 2),
+        );
         h.frames.send(f3).await.unwrap();
         let night = dir.path().join("images").join(&date);
         wait_for("keogram with 3 columns after replay", || {
@@ -484,13 +709,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dawn_tick_finalizes_a_past_night_with_a_timelapse() {
+    async fn dawn_tick_finalizes_a_past_night_with_day_and_night_timelapses() {
         // A frame for YESTERDAY's night: the very next tick sees
         // night_date(now) != state.date and finalizes → fake ffmpeg runs.
         let dir = tempfile::TempDir::new().unwrap();
         let cfg = test_cfg();
-        let yesterday =
-            (crate::capture::night_date(chrono::Local::now()) - chrono::Days::new(1)).to_string();
+        let yesterday = (crate::capture::night_date(chrono::Local::now(), LAT, LON)
+            - chrono::Days::new(1))
+        .to_string();
         let h = spawn_processing(
             cfg,
             dir.path().to_path_buf(),
@@ -499,24 +725,40 @@ mod tests {
                 dawn_check: std::time::Duration::from_millis(100),
             },
         );
-        let f = seed_frame(dir.path(), &yesterday, "20260715-220000.jpg", [10, 10, 10]);
+        let f = seed_frame(
+            dir.path(),
+            &yesterday,
+            "20260715-220000.jpg",
+            [10, 10, 10],
+            &night_ts(&yesterday, 22, 0),
+        );
         h.frames.send(f).await.unwrap();
         let night = dir.path().join("images").join(&yesterday);
-        wait_for("timelapse after dawn finalize", || {
-            night.join("timelapse.mp4").is_file()
+        wait_for("night timelapse after dawn finalize", || {
+            night.join("timelapse-night.mp4").is_file()
         })
         .await;
+        // Only one (night-classified) frame was seeded, so no day timelapse.
+        assert!(!night.join("timelapse-day.mp4").exists());
         // status file must not be stuck in generating
         let st = status::load(&night);
-        assert_eq!(st.timelapse, None, "generating flag must be cleared");
+        assert_eq!(
+            st.timelapse_day, None,
+            "day generating flag must be cleared"
+        );
+        assert_eq!(
+            st.timelapse_night, None,
+            "night generating flag must be cleared"
+        );
     }
 
     #[tokio::test]
     async fn timelapse_failure_lands_in_the_status_file() {
         let dir = tempfile::TempDir::new().unwrap();
         let cfg = test_cfg();
-        let yesterday =
-            (crate::capture::night_date(chrono::Local::now()) - chrono::Days::new(1)).to_string();
+        let yesterday = (crate::capture::night_date(chrono::Local::now(), LAT, LON)
+            - chrono::Days::new(1))
+        .to_string();
         // Failure marker for the fake ffmpeg.
         let night = dir.path().join("images").join(&yesterday);
         std::fs::create_dir_all(&night).unwrap();
@@ -529,16 +771,22 @@ mod tests {
                 dawn_check: std::time::Duration::from_millis(100),
             },
         );
-        let f = seed_frame(dir.path(), &yesterday, "20260715-220000.jpg", [10, 10, 10]);
+        let f = seed_frame(
+            dir.path(),
+            &yesterday,
+            "20260715-220000.jpg",
+            [10, 10, 10],
+            &night_ts(&yesterday, 22, 0),
+        );
         h.frames.send(f).await.unwrap();
         wait_for("timelapse error recorded", || {
             matches!(
-                status::load(&night).timelapse,
+                status::load(&night).timelapse_night,
                 Some(status::ArtifactProgress::Error { .. })
             )
         })
         .await;
-        assert!(!night.join("timelapse.mp4").exists());
+        assert!(!night.join("timelapse-night.mp4").exists());
     }
 
     #[tokio::test]
@@ -547,8 +795,9 @@ mod tests {
         // arriving until noon; they must NOT re-replay the night or re-run ffmpeg.
         let dir = tempfile::TempDir::new().unwrap();
         let cfg = test_cfg();
-        let yesterday =
-            (crate::capture::night_date(chrono::Local::now()) - chrono::Days::new(1)).to_string();
+        let yesterday = (crate::capture::night_date(chrono::Local::now(), LAT, LON)
+            - chrono::Days::new(1))
+        .to_string();
         let h = spawn_processing(
             cfg,
             dir.path().to_path_buf(),
@@ -557,19 +806,34 @@ mod tests {
                 dawn_check: std::time::Duration::from_millis(100),
             },
         );
-        let f = seed_frame(dir.path(), &yesterday, "20260715-220000.jpg", [10, 10, 10]);
+        let f = seed_frame(
+            dir.path(),
+            &yesterday,
+            "20260715-220000.jpg",
+            [10, 10, 10],
+            &night_ts(&yesterday, 22, 0),
+        );
         h.frames.send(f).await.unwrap();
         let night = dir.path().join("images").join(&yesterday);
-        wait_for("first finalize", || night.join("timelapse.mp4").is_file()).await;
+        wait_for("first finalize", || {
+            night.join("timelapse-night.mp4").is_file()
+        })
+        .await;
 
         // Remove the output, send a late frame for the same (finalized) night,
         // and give the supervisor several ticks: nothing may be regenerated.
-        std::fs::remove_file(night.join("timelapse.mp4")).unwrap();
-        let late = seed_frame(dir.path(), &yesterday, "20260715-230000.jpg", [20, 20, 20]);
+        std::fs::remove_file(night.join("timelapse-night.mp4")).unwrap();
+        let late = seed_frame(
+            dir.path(),
+            &yesterday,
+            "20260715-230000.jpg",
+            [20, 20, 20],
+            &night_ts(&yesterday, 23, 0),
+        );
         h.frames.send(late).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         assert!(
-            !night.join("timelapse.mp4").exists(),
+            !night.join("timelapse-night.mp4").exists(),
             "finalized night was re-finalized by a late frame"
         );
         // And the keogram was not re-replayed with the late frame appended.
@@ -581,8 +845,20 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let cfg = test_cfg();
         let date = "2026-07-10"; // an old, closed night
-        seed_frame(dir.path(), date, "20260710-220000.jpg", [10, 10, 10]);
-        seed_frame(dir.path(), date, "20260710-220100.jpg", [20, 20, 20]);
+        seed_frame(
+            dir.path(),
+            date,
+            "20260710-220000.jpg",
+            [10, 10, 10],
+            &night_ts(date, 22, 0),
+        );
+        seed_frame(
+            dir.path(),
+            date,
+            "20260710-220100.jpg",
+            [20, 20, 20],
+            &night_ts(date, 22, 1),
+        );
         let h = spawn_processing(
             cfg,
             dir.path().to_path_buf(),
@@ -598,16 +874,21 @@ mod tests {
             .await
             .unwrap();
         let night = dir.path().join("images").join(date);
-        wait_for("all three artifacts after rebuild", || {
+        wait_for("all four artifacts after rebuild", || {
             night.join("keogram.jpg").is_file()
                 && night.join("startrails.jpg").is_file()
-                && night.join("timelapse.mp4").is_file()
+                && night.join("timelapse-night.mp4").is_file()
         })
         .await;
         let st = status::load(&night);
         assert_eq!(
-            (st.keogram, st.startrails, st.timelapse),
-            (None, None, None)
+            (
+                st.keogram,
+                st.startrails,
+                st.timelapse_day,
+                st.timelapse_night
+            ),
+            (None, None, None, None)
         );
         assert_eq!(image::open(night.join("keogram.jpg")).unwrap().width(), 2);
     }
@@ -633,14 +914,12 @@ mod tests {
             })
             .await
             .unwrap();
-        // Wait for the rebuild to fully finish (timelapse.mp4 is written last,
-        // by finalize_night, so this can't race the up-front Generating write
-        // the way polling keogram/startrails directly from t=0 would: a fresh
-        // dir has no processing.json yet, and status::load defaults absent
-        // fields to None, which would let a still-stuck flag slip past a
-        // check that runs before the rebuild has even started).
+        // Wait for the rebuild to fully finish. Since there are no frames at
+        // all, run_timelapse's empty-list no-op means neither timelapse file
+        // is ever written — poll on the status file settling instead.
         wait_for("rebuild completes", || {
-            night.join("timelapse.mp4").is_file()
+            let st = status::load(&night);
+            st.timelapse_day.is_none() && st.timelapse_night.is_none()
         })
         .await;
         let st = status::load(&night);
@@ -652,16 +931,24 @@ mod tests {
         );
         assert!(!night.join("keogram.jpg").exists());
         assert!(!night.join("startrails.jpg").exists());
+        assert!(!night.join("timelapse-day.mp4").exists());
+        assert!(!night.join("timelapse-night.mp4").exists());
     }
 
     #[tokio::test]
     async fn live_frames_flow_while_a_rebuild_is_in_flight() {
         let dir = tempfile::TempDir::new().unwrap();
         let cfg = test_cfg();
-        let today = crate::capture::night_date(chrono::Local::now()).to_string();
+        let today = crate::capture::night_date(chrono::Local::now(), LAT, LON).to_string();
         // An old night to rebuild, with a slow (2 s) fake ffmpeg.
         let old = "2026-07-01";
-        seed_frame(dir.path(), old, "20260701-220000.jpg", [10, 10, 10]);
+        seed_frame(
+            dir.path(),
+            old,
+            "20260701-220000.jpg",
+            [10, 10, 10],
+            &night_ts(old, 22, 0),
+        );
         std::fs::write(
             dir.path()
                 .join("images")
@@ -691,12 +978,18 @@ mod tests {
         // which would let a loop-blocking regression slip through undetected.
         let old_night = dir.path().join("images").join(old);
         wait_for("rebuild picked up", || {
-            status::load(&old_night).timelapse == Some(status::ArtifactProgress::Generating)
+            status::load(&old_night).timelapse_night == Some(status::ArtifactProgress::Generating)
         })
         .await;
         // While the rebuild sleeps in ffmpeg, a live frame for TODAY must still be processed.
         let started = std::time::Instant::now();
-        let f = seed_frame(dir.path(), &today, "20260716-220000.jpg", [30, 30, 30]);
+        let f = seed_frame(
+            dir.path(),
+            &today,
+            "20260716-220000.jpg",
+            [30, 30, 30],
+            &night_ts(&today, 22, 0),
+        );
         h.frames.send(f).await.unwrap();
         let today_night = dir.path().join("images").join(&today);
         wait_for("live keogram during rebuild", || {
@@ -713,12 +1006,12 @@ mod tests {
         );
         // Direct proof the rebuild hadn't finished when the live frame landed.
         assert!(
-            !old_night.join("timelapse.mp4").exists(),
+            !old_night.join("timelapse-night.mp4").exists(),
             "rebuild finished before the live frame — nothing was in flight"
         );
         // Then the rebuild completes normally.
         wait_for("rebuild finishes", || {
-            old_night.join("timelapse.mp4").is_file()
+            old_night.join("timelapse-night.mp4").is_file()
         })
         .await;
     }

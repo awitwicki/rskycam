@@ -23,7 +23,9 @@ pub struct NightProcessingStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startrails: Option<ArtifactProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timelapse: Option<ArtifactProgress>,
+    pub timelapse_day: Option<ArtifactProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timelapse_night: Option<ArtifactProgress>,
 }
 
 pub fn load(night_dir: &Path) -> NightProcessingStatus {
@@ -68,7 +70,7 @@ mod tests {
         assert_eq!(load(dir.path()), NightProcessingStatus::default());
 
         let st = NightProcessingStatus {
-            timelapse: Some(ArtifactProgress::Error {
+            timelapse_day: Some(ArtifactProgress::Error {
                 message: "no ffmpeg".into(),
             }),
             keogram: Some(ArtifactProgress::Generating),
@@ -125,16 +127,17 @@ mod tests {
     #[test]
     fn wire_format_matches_artifact_state_tags() {
         let st = NightProcessingStatus {
-            timelapse: Some(ArtifactProgress::Error {
+            timelapse_day: Some(ArtifactProgress::Error {
                 message: "boom".into(),
             }),
             startrails: Some(ArtifactProgress::Generating),
             ..Default::default()
         };
         let v: serde_json::Value = serde_json::to_value(&st).unwrap();
-        assert_eq!(v["timelapse"]["state"], "error");
-        assert_eq!(v["timelapse"]["message"], "boom");
+        assert_eq!(v["timelapseDay"]["state"], "error");
+        assert_eq!(v["timelapseDay"]["message"], "boom");
         assert_eq!(v["startrails"]["state"], "generating");
         assert!(v.get("keogram").is_none()); // absent, not null
+        assert!(v.get("timelapseNight").is_none()); // absent, not null
     }
 }

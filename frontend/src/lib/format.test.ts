@@ -4,7 +4,9 @@ import { formatExposure, formatUptime } from './format'
 describe('formatExposure', () => {
   it('formats whole seconds', () => expect(formatExposure(30_000_000)).toBe('30 s'))
   it('formats fractional seconds', () => expect(formatExposure(2_500_000)).toBe('2.5 s'))
-  it('formats sub-second as 1/x', () => expect(formatExposure(2_000)).toBe('1/500 s'))
+  it('formats sub-second in decimal seconds', () => expect(formatExposure(2_000)).toBe('0.002 s'))
+  it('formats short sub-second exposures without dropping precision', () =>
+    expect(formatExposure(32)).toBe('0.000032 s'))
 })
 
 describe('formatUptime', () => {

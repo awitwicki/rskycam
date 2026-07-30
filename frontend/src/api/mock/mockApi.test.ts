@@ -156,7 +156,9 @@ describe('MockApi nights', () => {
     const nights = await stub().getNights()
     expect(nights).toHaveLength(8)
     expect([...nights.map((n) => n.date)].sort().reverse()).toEqual(nights.map((n) => n.date))
-    const states = nights.flatMap((n) => [n.keogram.state, n.startrails.state, n.timelapse.state])
+    const states = nights.flatMap((n) => [
+      n.keogram.state, n.startrails.state, n.timelapseDay.state, n.timelapseNight.state,
+    ])
     for (const s of ['ready', 'generating', 'error', 'disabled']) expect(states).toContain(s)
   })
 
@@ -168,12 +170,14 @@ describe('MockApi nights', () => {
     await expect(api.getNight('1999-01-01')).rejects.toThrow(/not found/)
   })
 
-  it('rebuildNight flips timelapse to generating', async () => {
+  it('rebuildNight flips both timelapses to generating', async () => {
     const api = stub()
     const nights = await api.getNights()
-    const ready = nights.find((n) => n.timelapse.state === 'ready')!
+    const ready = nights.find((n) => n.timelapseNight.state === 'ready')!
     await api.rebuildNight(ready.date)
-    expect((await api.getNight(ready.date)).timelapse.state).toBe('generating')
+    const detail = await api.getNight(ready.date)
+    expect(detail.timelapseDay.state).toBe('generating')
+    expect(detail.timelapseNight.state).toBe('generating')
   })
 
   it('rebuildNight rejects for an unknown date', async () => {

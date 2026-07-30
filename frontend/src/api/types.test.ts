@@ -12,10 +12,11 @@ describe('api contract', () => {
       camera: { model: 'ZWO ASI120MM Mini', maxWidth: 1280, maxHeight: 960 },
       sensor: { state: 'ok', reading: { temperatureC: 8.4, pressureHpa: 1013.2, humidityPct: 62 } },
       system: {
-        model: 'Raspberry Pi 4 Model B Rev 1.4', cpuTempC: 52, ramUsedMb: 1200,
-        ramTotalMb: 3906, diskUsedGb: 41, diskTotalGb: 118, uptimeSec: 260000,
+        model: 'Raspberry Pi 4 Model B Rev 1.4', cpuTempC: 52, cpuLoadAvg5m: 2.25, cpuCores: 4,
+        ramUsedMb: 1200, ramTotalMb: 3906, diskUsedGb: 41, diskTotalGb: 118, uptimeSec: 260000,
         undervoltageNow: false, undervoltageSinceBoot: true,
       },
+      darksProgress: { current: 3, total: 15 },
     }
     expect(s.sensor.reading?.humidityPct).toBe(62)
 
@@ -28,7 +29,7 @@ describe('api contract', () => {
 
   it('accepts every ArtifactState variant', () => {
     const all: ArtifactState[] = [
-      { state: 'ready', url: '/x.jpg' },
+      { state: 'ready', url: '/x.jpg', sizeBytes: 12_345 },
       { state: 'generating' },
       { state: 'error', message: 'boom' },
       { state: 'pending' },
@@ -47,7 +48,8 @@ describe('api contract', () => {
       camera: {
         driver: 'mock', autoExposure: true, targetBrightness: 100,
         exposureUsMin: 32, exposureUsMax: 60_000_000, gainMin: 0, gainMax: 300,
-        manualExposureUs: 30_000_000, manualGain: 250, intervalSec: 60, captureDuringDay: false,
+        manualExposureUs: 30_000_000, manualGain: 250, intervalSecDay: 120, intervalSecNight: 60,
+        captureDuringDay: false,
         captureWidth: 1640, captureHeight: 1232,
       },
       image: { maskMode: 'circle', crop: { x: 160, y: 120, width: 960, height: 720 } },
@@ -60,8 +62,9 @@ describe('api contract', () => {
         textFields: [{ id: 'time', kind: 'time', x: 24, y: 40, fontSize: 24 }],
         bakeIntoSavedFrames: false,
       },
-      processing: { keogram: true, startrails: true, startrailsBrightnessLimit: 35, timelapse: true, timelapseFps: 25, timelapseExtraArgs: '' },
+      processing: { keogram: true, startrails: true, startrailsBrightnessLimit: 35, timelapseDay: true, timelapseNight: true, timelapseFps: 25, timelapseExtraArgs: '' },
       storage: { framesRetentionDays: 14, artifactsRetentionDays: 60 },
+      darks: { enabled: false, minGainToApply: 15, minExposureUsToApply: 10_000_000 },
     }
     expect(g.polylines[0].layer).toBe('altAz')
     expect(st.camera.driver).toBe('mock')

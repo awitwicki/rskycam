@@ -26,10 +26,13 @@ pub struct CameraSettings {
     pub gain_max: f64,
     pub manual_exposure_us: u64,
     pub manual_gain: f64,
-    pub interval_sec: u64,
-    pub capture_during_day: bool,
     // serde defaults let a config.toml written before these fields existed
     // load without resetting the rest of the settings.
+    #[serde(default = "default_interval_sec_day")]
+    pub interval_sec_day: u64,
+    #[serde(default = "default_interval_sec_night")]
+    pub interval_sec_night: u64,
+    pub capture_during_day: bool,
     #[serde(default = "default_capture_width")]
     pub capture_width: u32,
     #[serde(default = "default_capture_height")]
@@ -42,6 +45,18 @@ fn default_capture_width() -> u32 {
 
 fn default_capture_height() -> u32 {
     1232
+}
+
+// Day frames need less density (short exposures, slow-changing sky) and only
+// feed the optional day timelapse; night frames feed the keogram, star
+// trails, and night timelapse, so a tighter cadence makes those noticeably
+// smoother.
+fn default_interval_sec_day() -> u64 {
+    120
+}
+
+fn default_interval_sec_night() -> u64 {
+    60
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,13 +141,23 @@ pub struct OverlaySettings {
     pub bake_into_saved_frames: bool,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessingSettings {
     pub keogram: bool,
     pub startrails: bool,
     pub startrails_brightness_limit: f64,
-    pub timelapse: bool,
+    /// Timelapse of daytime frames for the night. Independent of
+    /// `timelapse_night` — either, both, or neither can be enabled.
+    #[serde(default = "default_true")]
+    pub timelapse_day: bool,
+    /// Timelapse of nighttime frames for the night.
+    #[serde(default = "default_true")]
+    pub timelapse_night: bool,
     pub timelapse_fps: u32,
     /// Extra ffmpeg args appended before the output path, whitespace-split
     /// into argv (no shell). Empty by default.
@@ -147,6 +172,22 @@ pub struct StorageSettings {
     pub artifacts_retention_days: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DarkFrameSettings {
+    pub enabled: bool,
+    pub min_gain_to_apply: f64,
+    pub min_exposure_us_to_apply: u64,
+}
+
+fn default_dark_frame_settings() -> DarkFrameSettings {
+    DarkFrameSettings {
+        enabled: false,
+        min_gain_to_apply: 15.0,
+        min_exposure_us_to_apply: 10_000_000,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
@@ -158,6 +199,8 @@ pub struct Settings {
     pub overlay: OverlaySettings,
     pub processing: ProcessingSettings,
     pub storage: StorageSettings,
+    #[serde(default = "default_dark_frame_settings")]
+    pub darks: DarkFrameSettings,
 }
 
 impl Default for Settings {
@@ -173,7 +216,8 @@ impl Default for Settings {
                 gain_max: 16.0,
                 manual_exposure_us: 5_000_000,
                 manual_gain: 8.0,
-                interval_sec: 60,
+                interval_sec_day: default_interval_sec_day(),
+                interval_sec_night: default_interval_sec_night(),
                 capture_during_day: false,
                 capture_width: 1640, // imx219 full-FoV 2x2 binned mode (2 MP)
                 capture_height: 1232,
@@ -223,13 +267,19 @@ impl Default for Settings {
                 keogram: true,
                 startrails: true,
                 startrails_brightness_limit: 35.0,
-                timelapse: true,
+                timelapse_day: true,
+                timelapse_night: true,
                 timelapse_fps: 25,
                 timelapse_extra_args: String::new(),
             },
             storage: StorageSettings {
                 frames_retention_days: 14,
                 artifacts_retention_days: 60,
+            },
+            darks: DarkFrameSettings {
+                enabled: false,
+                min_gain_to_apply: 15.0,
+                min_exposure_us_to_apply: 10_000_000,
             },
         }
     }
@@ -249,7 +299,8 @@ impl Settings {
         c.manual_exposure_us = c
             .manual_exposure_us
             .clamp(c.exposure_us_min, c.exposure_us_max);
-        c.interval_sec = c.interval_sec.max(1);
+        c.interval_sec_day = c.interval_sec_day.max(1);
+        c.interval_sec_night = c.interval_sec_night.max(1);
         c.target_brightness = c.target_brightness.clamp(1.0, 254.0);
         c.capture_width = c.capture_width.max(8);
         c.capture_height = c.capture_height.max(2);
@@ -262,6 +313,8 @@ impl Settings {
 
         self.storage.frames_retention_days = self.storage.frames_retention_days.max(1);
         self.storage.artifacts_retention_days = self.storage.artifacts_retention_days.max(1);
+
+        self.darks.min_gain_to_apply = self.darks.min_gain_to_apply.max(0.0);
     }
 }
 
@@ -353,7 +406,8 @@ mod tests {
         assert_eq!(s.location.longitude_deg, 30.52);
         assert_eq!(s.camera.driver, CameraDriver::Rpicam);
         assert!(s.camera.auto_exposure);
-        assert_eq!(s.camera.interval_sec, 60);
+        assert_eq!(s.camera.interval_sec_day, 120);
+        assert_eq!(s.camera.interval_sec_night, 60);
         assert_eq!(s.image.mask_mode, MaskMode::None);
         assert!(s.image.crop.is_none());
         assert!(s.sensor.enabled);
@@ -368,6 +422,14 @@ mod tests {
     }
 
     #[test]
+    fn darks_defaults_are_disabled_with_documented_thresholds() {
+        let s = Settings::default();
+        assert!(!s.darks.enabled);
+        assert_eq!(s.darks.min_gain_to_apply, 15.0);
+        assert_eq!(s.darks.min_exposure_us_to_apply, 10_000_000);
+    }
+
+    #[test]
     fn wire_json_is_camel_case_and_matches_the_ts_contract() {
         let s = Settings::default();
         let v: serde_json::Value = serde_json::to_value(&s).unwrap();
@@ -375,6 +437,8 @@ mod tests {
         assert!(v["camera"]["exposureUsMin"].is_number());
         assert_eq!(v["camera"]["captureWidth"], 1640);
         assert_eq!(v["camera"]["captureHeight"], 1232);
+        assert_eq!(v["camera"]["intervalSecDay"], 120);
+        assert_eq!(v["camera"]["intervalSecNight"], 60);
         assert_eq!(v["image"]["maskMode"], "none");
         assert_eq!(v["image"]["crop"], serde_json::Value::Null);
         assert_eq!(v["sensor"]["enabled"], true);
@@ -383,6 +447,11 @@ mod tests {
         assert_eq!(v["overlay"]["calibration"]["radiusPx"], 620.0);
         assert_eq!(v["storage"]["artifactsRetentionDays"], 60);
         assert_eq!(v["processing"]["timelapseExtraArgs"], "");
+        assert_eq!(v["processing"]["timelapseDay"], true);
+        assert_eq!(v["processing"]["timelapseNight"], true);
+        assert_eq!(v["darks"]["enabled"], false);
+        assert_eq!(v["darks"]["minGainToApply"], 15.0);
+        assert_eq!(v["darks"]["minExposureUsToApply"], 10_000_000);
         // settings JSON must never leak the password hash
         assert!(v.get("passwordHash").is_none());
     }
@@ -449,6 +518,98 @@ mod tests {
     }
 
     #[test]
+    fn config_without_the_day_night_timelapse_split_loads_with_both_defaulted_true() {
+        // A config.toml written before the day/night timelapse split (no
+        // `timelapseDay`/`timelapseNight` keys — an old `timelapse` key, if
+        // present, is simply an unrecognized extra key and ignored) must
+        // still load, with both new flags defaulting to true.
+        let dir = TempDir::new().unwrap();
+        let store = SettingsStore::new(dir.path());
+        let cfg = store.load_or_create("h").unwrap();
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        assert!(toml_str.contains("timelapseDay"));
+        let older: String = toml_str
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("timelapseDay") && !t.starts_with("timelapseNight")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!older.contains("timelapseDay"));
+        std::fs::write(dir.path().join("config.toml"), older).unwrap();
+
+        let loaded = store.load_or_create("h").unwrap();
+        assert!(loaded.settings.processing.timelapse_day);
+        assert!(loaded.settings.processing.timelapse_night);
+    }
+
+    #[test]
+    fn config_without_the_day_night_interval_split_loads_with_defaults() {
+        // A config.toml written before the day/night interval split (an old
+        // `intervalSec` key, if present, is simply an unrecognized extra key
+        // and ignored) must still load, with both new fields defaulted.
+        let dir = TempDir::new().unwrap();
+        let store = SettingsStore::new(dir.path());
+        let mut cfg = store.load_or_create("h").unwrap();
+        cfg.settings.location.latitude_deg = 41.9;
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        assert!(toml_str.contains("intervalSecDay"));
+        let older: String = toml_str
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("intervalSecDay") && !t.starts_with("intervalSecNight")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!older.contains("intervalSecDay"));
+        std::fs::write(dir.path().join("config.toml"), older).unwrap();
+
+        let loaded = store.load_or_create("h").unwrap();
+        assert_eq!(loaded.settings.location.latitude_deg, 41.9); // preserved
+        assert_eq!(loaded.settings.camera.interval_sec_day, 120);
+        assert_eq!(loaded.settings.camera.interval_sec_night, 60);
+    }
+
+    #[test]
+    fn config_without_darks_section_loads_with_default() {
+        let dir = TempDir::new().unwrap();
+        let store = SettingsStore::new(dir.path());
+        let mut cfg = store.load_or_create("h").unwrap();
+        cfg.settings.location.latitude_deg = 41.9;
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        assert!(toml_str.contains("[settings.darks]"));
+        // Strip the whole [settings.darks] table (its header line through the
+        // next table header) to simulate a config.toml written before this
+        // feature existed.
+        let mut older = String::new();
+        let mut skipping = false;
+        for line in toml_str.lines() {
+            if line.trim_start() == "[settings.darks]" {
+                skipping = true;
+                continue;
+            }
+            if skipping && line.starts_with('[') {
+                skipping = false;
+            }
+            if skipping {
+                continue;
+            }
+            older.push_str(line);
+            older.push('\n');
+        }
+        assert!(!older.contains("[settings.darks]"));
+        std::fs::write(dir.path().join("config.toml"), older).unwrap();
+
+        let loaded = store.load_or_create("h").unwrap();
+        assert_eq!(loaded.settings.location.latitude_deg, 41.9); // preserved
+        assert!(!loaded.settings.darks.enabled);
+        assert_eq!(loaded.settings.darks.min_gain_to_apply, 15.0);
+        assert_eq!(loaded.settings.darks.min_exposure_us_to_apply, 10_000_000);
+    }
+
+    #[test]
     fn store_roundtrips_and_creates_defaults() {
         let dir = TempDir::new().unwrap();
         let store = SettingsStore::new(dir.path());
@@ -488,7 +649,8 @@ mod tests {
         s.camera.gain_min = -5.0;
         s.camera.gain_max = 0.5; // below gain_min after its own clamp
         s.camera.manual_exposure_us = 0;
-        s.camera.interval_sec = 0;
+        s.camera.interval_sec_day = 0;
+        s.camera.interval_sec_night = 0;
         s.camera.target_brightness = 999.0;
         s.camera.capture_width = 0;
         s.camera.capture_height = 1;
@@ -497,6 +659,7 @@ mod tests {
         s.processing.startrails_brightness_limit = 900.0;
         s.storage.frames_retention_days = 0;
         s.storage.artifacts_retention_days = 0;
+        s.darks.min_gain_to_apply = -5.0;
         s.sanitize();
         assert!(s.camera.gain_min >= 0.0);
         assert!(s.camera.gain_max >= s.camera.gain_min);
@@ -504,7 +667,8 @@ mod tests {
             s.camera.manual_gain >= s.camera.gain_min && s.camera.manual_gain <= s.camera.gain_max
         );
         assert!(s.camera.manual_exposure_us >= 1);
-        assert!(s.camera.interval_sec >= 1);
+        assert!(s.camera.interval_sec_day >= 1);
+        assert!(s.camera.interval_sec_night >= 1);
         assert!(s.camera.target_brightness >= 1.0 && s.camera.target_brightness <= 254.0);
         assert!(s.camera.capture_width >= 8 && s.camera.capture_height >= 2);
         assert!(s.overlay.grid_opacity >= 0.0 && s.overlay.grid_opacity <= 1.0);
@@ -514,6 +678,7 @@ mod tests {
                 && s.processing.startrails_brightness_limit <= 255.0
         );
         assert!(s.storage.frames_retention_days >= 1 && s.storage.artifacts_retention_days >= 1);
+        assert!(s.darks.min_gain_to_apply >= 0.0);
     }
 
     #[test]

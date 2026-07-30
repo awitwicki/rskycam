@@ -8,6 +8,8 @@ use serde::Serialize;
 pub struct SystemStatus {
     pub model: String,
     pub cpu_temp_c: f64,
+    pub cpu_load_avg_5m: f64,
+    pub cpu_cores: u32,
     pub ram_used_mb: u64,
     pub ram_total_mb: u64,
     pub disk_used_gb: f64,
@@ -49,6 +51,12 @@ pub fn parse_cpu_temp(millideg: &str) -> Option<f64> {
     millideg.trim().parse::<f64>().ok().map(|v| v / 1000.0)
 }
 
+/// 5-minute load average — the second field of /proc/loadavg
+/// ("<1m> <5m> <15m> <running>/<total> <last-pid>").
+pub fn parse_loadavg(s: &str) -> Option<f64> {
+    s.split_whitespace().nth(1)?.parse::<f64>().ok()
+}
+
 fn disk_usage(path: &Path) -> Option<(f64, f64)> {
     #[cfg(target_os = "linux")]
     {
@@ -74,6 +82,13 @@ pub fn read_system_status(data_dir: &Path) -> SystemStatus {
         .ok()
         .and_then(|s| parse_cpu_temp(&s))
         .unwrap_or(48.0);
+    let cpu_load_avg_5m = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|s| parse_loadavg(&s))
+        .unwrap_or(0.8);
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(4);
     let (ram_used_mb, ram_total_mb) = std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|s| parse_meminfo(&s))
@@ -94,6 +109,8 @@ pub fn read_system_status(data_dir: &Path) -> SystemStatus {
     SystemStatus {
         model,
         cpu_temp_c,
+        cpu_load_avg_5m,
+        cpu_cores,
         ram_used_mb,
         ram_total_mb,
         disk_used_gb,
@@ -131,10 +148,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_five_minute_field_of_loadavg() {
+        assert_eq!(parse_loadavg("0.52 2.25 0.59 1/234 5678\n"), Some(2.25));
+        assert_eq!(parse_loadavg("garbage"), None);
+    }
+
+    #[test]
     fn read_system_status_never_panics_and_fills_every_field() {
         let s = read_system_status(std::path::Path::new("/tmp"));
         assert!(!s.model.is_empty());
         assert!(s.ram_total_mb > 0);
         assert!(s.disk_total_gb > 0.0);
+        assert!(s.cpu_cores > 0);
+        assert!(s.cpu_load_avg_5m >= 0.0);
     }
 }

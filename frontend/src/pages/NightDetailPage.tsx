@@ -6,7 +6,7 @@ import type { NightDetail } from '../api/types'
 import ArtifactCard from '../components/ArtifactCard'
 import Lightbox, { type LightboxItem } from '../components/Lightbox'
 import { Button, Card } from '../components/ui'
-import { formatExposure, formatGain } from '../lib/format'
+import { formatBytes, formatExposure, formatGain } from '../lib/format'
 
 export default function NightDetailPage() {
   const { date = '' } = useParams()
@@ -25,7 +25,8 @@ export default function NightDetailPage() {
 
   const anyGenerating =
     night !== null &&
-    [night.keogram, night.startrails, night.timelapse].some((a) => a.state === 'generating')
+    [night.keogram, night.startrails, night.timelapseDay, night.timelapseNight]
+      .some((a) => a.state === 'generating')
 
   // A rebuild (or dawn) leaves artifacts in 'generating'; poll until they settle.
   useEffect(() => {
@@ -63,7 +64,10 @@ export default function NightDetailPage() {
       <header className="flex items-center justify-between">
         <h1 className="font-mono text-lg">
           {night.date}
-          <span className="ml-3 text-sm text-fgdim">{night.frameCount} frames</span>
+          <span className="ml-3 text-sm text-fgdim">
+            {night.frameCount} frames ({formatBytes(night.framesSizeBytes)}) ·{' '}
+            {formatBytes(night.totalSizeBytes)} total
+          </span>
         </h1>
         <div className="flex items-center gap-2">
           <Button variant="ghost" onClick={rebuild}>
@@ -112,7 +116,7 @@ export default function NightDetailPage() {
         )}
       </ArtifactCard>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-4 md:grid-cols-3">
         <ArtifactCard title="Star trails" artifact={night.startrails}>
           {(url) => (
             <button className="block w-full" aria-label="View star trails fullscreen"
@@ -121,13 +125,16 @@ export default function NightDetailPage() {
             </button>
           )}
         </ArtifactCard>
-        <ArtifactCard title="Timelapse" artifact={night.timelapse}>
+        <ArtifactCard title="Day timelapse" artifact={night.timelapseDay} showSize>
+          {(url) => <video src={url} controls className="w-full rounded-lg" />}
+        </ArtifactCard>
+        <ArtifactCard title="Night timelapse" artifact={night.timelapseNight} showSize>
           {(url) => <video src={url} controls className="w-full rounded-lg" />}
         </ArtifactCard>
       </div>
 
       <Card title="Frames">
-        <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+        <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8">
           {night.frames.map((f, i) => (
             <button key={f.timestamp}
               title={`${new Date(f.timestamp).toLocaleTimeString()} · exp ${formatExposure(f.exposureUs)} · gain ${formatGain(f.gain)}`}
@@ -140,7 +147,8 @@ export default function NightDetailPage() {
                 })),
                 index: i,
               })}>
-              <img src={f.url} alt={`Frame ${new Date(f.timestamp).toLocaleTimeString()}`}
+              <img src={f.thumbUrl} alt={`Frame ${new Date(f.timestamp).toLocaleTimeString()}`}
+                loading="lazy" decoding="async"
                 className="aspect-square w-full rounded object-cover transition hover:opacity-80" />
             </button>
           ))}

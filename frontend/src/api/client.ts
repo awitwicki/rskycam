@@ -1,5 +1,5 @@
 import type {
-  ApiEvent, LightgraphData, NightDetail, NightSummary, OverlayGeometry,
+  ApiEvent, DarksLibrary, LightgraphData, NightDetail, NightSummary, OverlayGeometry,
   OverlayRequest, Settings, Status,
 } from './types'
 import { MockApi } from './mock/mockApi'
@@ -22,6 +22,9 @@ export interface ApiClient {
   getNight(date: string): Promise<NightDetail>
   rebuildNight(date: string): Promise<void>
   deleteNight(date: string): Promise<void>
+  startDarksCapture(): Promise<void>
+  getDarksLibrary(): Promise<DarksLibrary>
+  clearDarks(): Promise<void>
 }
 
 let instance: ApiClient | null = null

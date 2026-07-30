@@ -9,7 +9,7 @@ use axum::extract::FromRef;
 use axum::routing::{get, post};
 use axum::Router;
 use axum_extra::extract::cookie::Key;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 
 use crate::capture::{CaptureStatus, LatestFrame};
 use crate::settings::{ConfigFile, SettingsStore};
@@ -21,6 +21,8 @@ pub struct AppState {
     pub latest: watch::Receiver<Option<Arc<LatestFrame>>>,
     pub capture_status: watch::Receiver<CaptureStatus>,
     pub camera_caps: watch::Receiver<Option<crate::capture::CameraCaps>>,
+    pub darks_cmd: mpsc::Sender<()>,
+    pub darks_progress: watch::Receiver<Option<crate::darks::DarksProgress>>,
     pub key: Key,
     pub data_dir: PathBuf,
     pub processing: crate::processing::ProcessingHandle,
@@ -147,6 +149,39 @@ mod tests {
         );
         assert!(status == StatusCode::OK || status == StatusCode::SERVICE_UNAVAILABLE);
     }
+
+    // Only meaningful in the embed-ui build: the non-embed spa_service already
+    // derives its mime type from the resolved (post-fallback) file, so it
+    // never had this bug.
+    #[cfg(feature = "embed-ui")]
+    #[tokio::test]
+    async fn spa_fallback_serves_client_side_routes_as_html_not_octet_stream() {
+        use crate::web::testing::harness;
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+        // "/nights" isn't an embedded asset — it must fall back to
+        // index.html's content AND its text/html content type. Serving that
+        // HTML body as application/octet-stream (mime guessed from the
+        // extension-less "nights" path instead of the file actually served)
+        // makes browsers download the page instead of rendering it.
+        let h = harness();
+        let app = crate::web::router(h.state.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/nights")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let content_type = res.headers()[header::CONTENT_TYPE].to_str().unwrap();
+        assert!(
+            content_type.starts_with("text/html"),
+            "expected text/html, got {content_type}"
+        );
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -162,6 +197,8 @@ pub fn router(state: AppState) -> Router {
             "/api/settings",
             get(api::get_settings).put(api::put_settings),
         )
+        .route("/api/darks", get(api::get_darks).delete(api::delete_darks))
+        .route("/api/darks/capture", post(api::start_darks_capture))
         .route("/api/nights", get(nights::get_nights))
         .route(
             "/api/nights/{date}",
@@ -191,11 +228,20 @@ fn spa_service() -> axum::routing::MethodRouter {
 
     axum::routing::get(|uri: Uri| async move {
         let path = uri.path().trim_start_matches('/');
-        let file = if path.is_empty() { "index.html" } else { path };
-        let asset = Assets::get(file).or_else(|| Assets::get("index.html"));
+        let requested = if path.is_empty() { "index.html" } else { path };
+        // Client-side routes (e.g. "nights", "settings") don't exist as
+        // embedded assets, so this falls back to index.html's *content* — the
+        // mime type must be re-derived from that served name too, not the
+        // originally requested (often extension-less) path, or the browser
+        // gets an HTML body labeled application/octet-stream and downloads
+        // it instead of rendering it.
+        let (served, asset) = match Assets::get(requested) {
+            Some(content) => (requested, Some(content)),
+            None => ("index.html", Assets::get("index.html")),
+        };
         match asset {
             Some(content) => {
-                let mime = mime_guess::from_path(file).first_or_octet_stream();
+                let mime = mime_guess::from_path(served).first_or_octet_stream();
                 (
                     [(header::CONTENT_TYPE, mime.as_ref().to_string())],
                     content.data.into_owned(),
@@ -272,6 +318,11 @@ pub(crate) mod testing {
         #[allow(dead_code)]
         pub status_tx: watch::Sender<CaptureStatus>,
         pub caps_tx: watch::Sender<Option<crate::capture::CameraCaps>>,
+        pub darks_progress_tx: watch::Sender<Option<crate::darks::DarksProgress>>,
+        // Kept alive so AppState.darks_cmd's receiving end doesn't close; not
+        // drained by every test.
+        #[allow(dead_code)]
+        pub darks_cmd_rx: mpsc::Receiver<()>,
         // Kept alive only to hold the TempDir guard for the harness's lifetime.
         #[allow(dead_code)]
         pub dir: tempfile::TempDir,
@@ -291,6 +342,8 @@ pub(crate) mod testing {
             last_frame: None,
         });
         let (caps_tx, camera_caps) = watch::channel(None);
+        let (darks_cmd_tx, darks_cmd_rx) = mpsc::channel::<()>(1);
+        let (darks_progress_tx, darks_progress) = watch::channel(None);
         let processing = crate::processing::spawn_processing(
             // note: reuse the same Arc<RwLock<ConfigFile>> that goes into AppState
             cfg_arc.clone(),
@@ -307,6 +360,8 @@ pub(crate) mod testing {
             latest,
             capture_status,
             camera_caps,
+            darks_cmd: darks_cmd_tx,
+            darks_progress,
             key: Key::generate(),
             data_dir: dir.path().to_path_buf(),
             processing,
@@ -316,6 +371,8 @@ pub(crate) mod testing {
             latest_tx,
             status_tx,
             caps_tx,
+            darks_progress_tx,
+            darks_cmd_rx,
             dir,
         }
     }

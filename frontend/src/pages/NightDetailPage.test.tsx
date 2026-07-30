@@ -7,13 +7,16 @@ import type { ApiClient } from '../api/client'
 import type { NightDetail } from '../api/types'
 import NightDetailPage from './NightDetailPage'
 
-const night = (timelapse: NightDetail['timelapse']): NightDetail => ({
+const night = (timelapseNight: NightDetail['timelapseNight']): NightDetail => ({
   date: '2026-07-14',
   frameCount: 2,
+  framesSizeBytes: 500_000,
+  totalSizeBytes: 500_000,
   thumbnailUrl: '',
   keogram: { state: 'pending' },
   startrails: { state: 'pending' },
-  timelapse,
+  timelapseDay: { state: 'pending' },
+  timelapseNight,
   frames: [],
 })
 
@@ -39,7 +42,7 @@ describe('NightDetailPage generating poll', () => {
       .fn<() => Promise<NightDetail>>()
       .mockResolvedValueOnce(night({ state: 'generating' }))
       .mockResolvedValueOnce(night({ state: 'generating' }))
-      .mockResolvedValue(night({ state: 'ready', url: '/api/files/x/timelapse.mp4' }))
+      .mockResolvedValue(night({ state: 'ready', url: '/api/files/x/timelapse.mp4', sizeBytes: 12_000_000 }))
     setApi({ getNight } as unknown as ApiClient)
 
     renderPage()
@@ -75,7 +78,7 @@ describe('NightDetailPage delete', () => {
     const deleteNight = vi.fn<(d: string) => Promise<void>>().mockResolvedValue()
     const getNight = vi
       .fn<() => Promise<NightDetail>>()
-      .mockResolvedValue(night({ state: 'ready', url: '/x/timelapse.mp4' }))
+      .mockResolvedValue(night({ state: 'ready', url: '/x/timelapse.mp4', sizeBytes: 12_000_000 }))
     setApi({ getNight, deleteNight } as unknown as ApiClient)
 
     render(
@@ -105,6 +108,33 @@ describe('NightDetailPage delete', () => {
   })
 })
 
+describe('NightDetailPage frame grid', () => {
+  afterEach(cleanup)
+
+  it('shows thumbnails in the grid but opens the full image on click', async () => {
+    const ready: NightDetail = {
+      ...night({ state: 'pending' }),
+      frames: [{
+        timestamp: '2026-07-14T22:00:00Z',
+        url: '/api/files/2026-07-14/frames/full.jpg',
+        thumbUrl: '/api/files/2026-07-14/frames/full.jpg?thumb=1',
+        exposureUs: 30_000_000,
+        gain: 8,
+      }],
+    }
+    setApi({ getNight: () => Promise.resolve(ready) } as unknown as ApiClient)
+
+    renderPage()
+    const gridImg = await screen.findByAltText(/^frame /i)
+    expect(gridImg.getAttribute('src')).toBe('/api/files/2026-07-14/frames/full.jpg?thumb=1')
+
+    await userEvent.click(gridImg)
+    const dialog = await screen.findByRole('dialog')
+    const fullImg = dialog.querySelector('img')
+    expect(fullImg?.getAttribute('src')).toBe('/api/files/2026-07-14/frames/full.jpg')
+  })
+})
+
 describe('NightDetailPage keogram rendering', () => {
   afterEach(cleanup)
 
@@ -115,7 +145,7 @@ describe('NightDetailPage keogram rendering', () => {
     // thousand px tall. It must render as a fixed-height stretched strip.
     const ready: NightDetail = {
       ...night({ state: 'pending' }),
-      keogram: { state: 'ready', url: '/api/files/2026-07-14/keogram.jpg' },
+      keogram: { state: 'ready', url: '/api/files/2026-07-14/keogram.jpg', sizeBytes: 640_000 },
     }
     setApi({ getNight: () => Promise.resolve(ready) } as unknown as ApiClient)
 

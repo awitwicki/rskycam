@@ -99,6 +99,38 @@ pub(super) fn mono_to_rgb(buf: &[u8], w: u32, h: u32) -> RgbImage {
     })
 }
 
+/// Signature of the ASI120 family's corrupted-state failure mode: the sensor
+/// starts returning *binarized* frames — a large share of pure-black pixels
+/// AND a large share of pure-white ones with almost no midtones in between,
+/// at exposure/gain values that were just producing normal gradients. Real
+/// skies always carry midtones (gradients, cloud edges, vignetting), and the
+/// legitimate extremes auto-exposure hunts through are one-sided (nearly all
+/// white when blown, nearly all black when crushed), so demanding BOTH
+/// extremes together keeps this from firing on genuine frames. The remedy
+/// for the corrupted state is a camera close/reopen, so `capture` turns this
+/// into an error the supervisor answers with exactly that.
+pub(super) fn looks_binarized(buf: &[u8]) -> bool {
+    let mut lo = 0usize;
+    let mut hi = 0usize;
+    for &v in buf {
+        if v <= 5 {
+            lo += 1;
+        } else if v >= 250 {
+            hi += 1;
+        }
+    }
+    let n = buf.len().max(1);
+    let mid = n - lo - hi;
+    // Thresholds calibrated against captured evidence from the live camera:
+    // the corrupted frames measure 3.0-4.3% midtones even AFTER a JPEG
+    // round-trip inflated them (ringing on the fractal boundary), while the
+    // most extreme honest high-contrast frame on record (a dark cloud front
+    // against blown sky) measures 17.3%. 8% splits those with margin both
+    // ways, and the raw pre-JPEG buffer this runs on sits below the JPEG
+    // numbers.
+    mid * 100 < n * 8 && lo * 5 > n && hi * 5 > n
+}
+
 pub(super) fn round_roi(req_w: u32, req_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     let w = (req_w.min(max_w) / 8 * 8).max(8);
     let h = (req_h.min(max_h) / 2 * 2).max(2);
@@ -198,6 +230,31 @@ impl AsiCamera {
                     set_roi(id, w as c_int, h as c_int, 1, ffi::ASI_IMG_RAW8),
                     "ASISetROIFormat",
                 )?;
+
+                // Pin the controls we never touch afterwards to known-good
+                // values instead of trusting whatever state the camera woke
+                // up in. Observed on a live ASI120MM Mini: mid-session the
+                // sensor started returning binarized (pure black/white,
+                // no midtones) frames at unchanged exposure/gain — a
+                // corrupted-camera-state failure mode this family is known
+                // for, especially on Pi USB and when heated by direct sun.
+                // Bandwidth 40% is the canonical ASI120-on-Pi setting against
+                // USB transfer corruption; gamma 50 is the neutral midpoint.
+                // Best-effort: not every model exposes every control, and a
+                // missing optional control must not fail the probe.
+                let set_ctl: libloading::Symbol<
+                    unsafe extern "C" fn(c_int, c_int, c_long, c_int) -> c_int,
+                > = sdk.sym(b"ASISetControlValue")?;
+                for (ctl, val, name) in [
+                    (ffi::ASI_BANDWIDTHOVERLOAD, 40, "bandwidth"),
+                    (ffi::ASI_GAMMA, 50, "gamma"),
+                    (ffi::ASI_HIGH_SPEED_MODE, 0, "high speed mode"),
+                ] {
+                    let rc = set_ctl(id, ctl, val, 0);
+                    if rc != 0 {
+                        tracing::debug!("ASI set {name}={val}: {}", ffi::err_name(rc));
+                    }
+                }
                 Ok(Configured { w, h, exp, gain })
             };
             let Configured { w, h, exp, gain } = match configure() {
@@ -321,6 +378,16 @@ impl Camera for AsiCamera {
                 "ASIGetDataAfterExp",
             )?;
 
+            if looks_binarized(&buf) {
+                // See looks_binarized: corrupted camera state. Erroring here
+                // makes the supervisor drop this camera (Drop closes it) and
+                // re-probe fresh — the same close/reopen cycle that fixes it
+                // when done by hand via a resolution change.
+                return Err(CameraError::Capture(
+                    "frame is binarized (no midtones) — camera state corrupt, reopening".into(),
+                ));
+            }
+
             Ok(Frame {
                 image: mono_to_rgb(&buf, self.width, self.height),
                 timestamp: chrono::Utc::now(),
@@ -361,6 +428,33 @@ mod tests {
     // one loses with `AlreadyExists`. This lock only orders the two test
     // bodies; it doesn't change `extract_so` itself.
     static EXTRACT_SO_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn binarized_frames_are_detected_but_real_gradients_are_not() {
+        // Half pure black, half pure white, no midtones — the corrupted state.
+        let mut bad = vec![0u8; 500];
+        bad.extend(vec![255u8; 500]);
+        assert!(looks_binarized(&bad));
+
+        // A smooth gradient (every real sky has midtones) must pass.
+        let gradient: Vec<u8> = (0..1000).map(|i| (i * 255 / 999) as u8).collect();
+        assert!(!looks_binarized(&gradient));
+
+        // One-sided extremes are legitimate auto-exposure hunting frames,
+        // not corruption: nearly all blown white...
+        let blown = vec![255u8; 1000];
+        assert!(!looks_binarized(&blown));
+        // ...or nearly all crushed black (a plain night sky).
+        let crushed = vec![0u8; 1000];
+        assert!(!looks_binarized(&crushed));
+
+        // High-contrast but honest scene: both extremes present, yet with a
+        // meaningful share of midtone pixels along real edges.
+        let mut contrasty = vec![0u8; 450];
+        contrasty.extend(vec![255u8; 450]);
+        contrasty.extend((0..100).map(|i| (50 + i) as u8));
+        assert!(!looks_binarized(&contrasty));
+    }
 
     #[test]
     fn extracts_the_embedded_sdk_into_a_private_dir() {

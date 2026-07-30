@@ -1,7 +1,7 @@
 import type { ApiClient } from './client'
 import type {
-  ApiEvent, FrameMeta, LightgraphData, NightDetail, NightSummary, OverlayGeometry,
-  OverlayRequest, Settings, Status,
+  ApiEvent, DarksLibrary, FrameMeta, LightgraphData, NightDetail, NightSummary,
+  OverlayGeometry, OverlayRequest, Settings, Status,
 } from './types'
 
 const AUTH_FLAG = 'rskycam.auth'
@@ -100,5 +100,17 @@ export class RealApi implements ApiClient {
 
   async deleteNight(date: string): Promise<void> {
     await http(`/api/nights/${date}`, { method: 'DELETE' })
+  }
+
+  async startDarksCapture(): Promise<void> {
+    await http('/api/darks/capture', { method: 'POST' })
+  }
+
+  getDarksLibrary(): Promise<DarksLibrary> {
+    return http('/api/darks').then(json<DarksLibrary>)
+  }
+
+  async clearDarks(): Promise<void> {
+    await http('/api/darks', { method: 'DELETE' })
   }
 }

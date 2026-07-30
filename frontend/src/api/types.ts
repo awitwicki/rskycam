@@ -33,6 +33,8 @@ export interface SensorStatus {
 export interface SystemStatus {
   model: string
   cpuTempC: number
+  cpuLoadAvg5m: number // 5-minute load average (/proc/loadavg)
+  cpuCores: number
   ramUsedMb: number
   ramTotalMb: number
   diskUsedGb: number
@@ -55,12 +57,29 @@ export interface CameraCaps {
   maxHeight: number
 }
 
+export interface DarksProgress {
+  current: number
+  total: number
+}
+
+export interface DarkEntry {
+  exposureUs: number
+  gain: number
+  file: string
+  capturedAt: string
+}
+
+export interface DarksLibrary {
+  entries: DarkEntry[]
+}
+
 export interface Status {
   capture: CaptureStatus
   sensor: SensorStatus
   system: SystemStatus
   astro: AstroStatus
   camera: CameraCaps | null
+  darksProgress: DarksProgress | null
 }
 
 /** Sun altitude sampled across a 24h window (local noon → noon). */
@@ -72,7 +91,7 @@ export interface LightgraphData {
 
 // ── nights / gallery ───────────────────────────────────────────
 export type ArtifactState =
-  | { state: 'ready'; url: string }
+  | { state: 'ready'; url: string; sizeBytes: number }
   | { state: 'generating' }
   | { state: 'error'; message: string }
   | { state: 'pending' } // enabled in settings, not generated yet
@@ -81,15 +100,19 @@ export type ArtifactState =
 export interface NightSummary {
   date: string // "2026-07-13" — the evening's local date
   frameCount: number
+  framesSizeBytes: number // total size of frames/ on disk
+  totalSizeBytes: number // frames + keogram/startrails/timelapses, whatever exists
   thumbnailUrl: string
   keogram: ArtifactState
   startrails: ArtifactState
-  timelapse: ArtifactState
+  timelapseDay: ArtifactState
+  timelapseNight: ArtifactState
 }
 
 export interface FrameInfo {
   timestamp: string
   url: string
+  thumbUrl: string // small cached square crop, for the frame grid
   exposureUs: number
   gain: number
 }
@@ -190,7 +213,8 @@ export interface CameraSettings {
   gainMax: number
   manualExposureUs: number
   manualGain: number
-  intervalSec: number
+  intervalSecDay: number
+  intervalSecNight: number
   captureDuringDay: boolean
   captureWidth: number // capture resolution (Pi camera); 4:3 keeps the full fisheye view
   captureHeight: number
@@ -209,7 +233,8 @@ export interface ProcessingSettings {
   keogram: boolean
   startrails: boolean
   startrailsBrightnessLimit: number // skip frames brighter than this mean
-  timelapse: boolean
+  timelapseDay: boolean // timelapse of daytime frames
+  timelapseNight: boolean // timelapse of nighttime frames
   timelapseFps: number
   timelapseExtraArgs: string // extra ffmpeg args, whitespace-separated
 }
@@ -217,6 +242,12 @@ export interface ProcessingSettings {
 export interface StorageSettings {
   framesRetentionDays: number
   artifactsRetentionDays: number
+}
+
+export interface DarkFrameSettings {
+  enabled: boolean
+  minGainToApply: number
+  minExposureUsToApply: number
 }
 
 export interface Settings {
@@ -227,6 +258,7 @@ export interface Settings {
   overlay: OverlaySettings
   processing: ProcessingSettings
   storage: StorageSettings
+  darks: DarkFrameSettings
 }
 
 // ── events ─────────────────────────────────────────────────────
