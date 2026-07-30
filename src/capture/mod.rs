@@ -607,73 +607,121 @@ async fn run_darks_sweep(
     // sweep time. Sort-then-dedup so duplicates collapse wherever the
     // clamping created them (Vec::dedup only removes consecutive ones).
     let info = cam.info();
-    let mut targets: Vec<(u64, f64)> =
-        crate::darks::sweep_targets(s.camera.gain_min, s.camera.gain_max)
-            .into_iter()
-            .map(|(exposure_us, gain)| {
-                (
-                    exposure_us.clamp(info.min_exposure_us, info.max_exposure_us),
-                    gain.clamp(info.min_gain, info.max_gain),
-                )
-            })
-            .collect();
+    let full_grid = crate::darks::sweep_targets(s.camera.gain_min, s.camera.gain_max);
+    // Only sweep points the apply gate can ever use (darks below the
+    // configured gain/exposure thresholds are never subtracted from any
+    // frame — capturing them is pure wasted sweep time), with exposures
+    // capped at the configured maximum. If the thresholds exclude the whole
+    // grid (a config that can't apply darks at all), fall back to the full
+    // grid: a manual sweep that silently captures nothing would read as
+    // broken.
+    let filtered =
+        crate::darks::appliable_targets(full_grid.clone(), &s.darks, s.camera.exposure_us_max);
+    let chosen = if filtered.is_empty() {
+        tracing::info!(
+            "no sweep point passes the dark-apply thresholds; sweeping the full grid instead"
+        );
+        full_grid
+    } else {
+        filtered
+    };
+    let mut targets: Vec<(u64, f64)> = chosen
+        .into_iter()
+        .map(|(exposure_us, gain)| {
+            (
+                exposure_us.clamp(info.min_exposure_us, info.max_exposure_us),
+                gain.clamp(info.min_gain, info.max_gain),
+            )
+        })
+        .collect();
     targets.dedup();
     targets.sort_by(|a, b| {
         a.0.cmp(&b.0)
             .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
     });
     targets.dedup();
-    let total = targets.len() as u32;
-    for (i, (exposure_us, gain)) in targets.into_iter().enumerate() {
-        let _ = progress_tx.send(Some(crate::darks::DarksProgress {
-            current: (i + 1) as u32,
-            total,
-        }));
-        let params = CaptureParams { exposure_us, gain };
-        // Capture AND the dark-library write happen inside the SAME
-        // spawn_blocking closure — add_entry does real disk I/O (manifest
-        // read/write, PNG encode), which must never run directly on the
-        // async task (same discipline the main capture loop already
-        // follows for capture+process_frame+persist).
-        let data_dir_owned = data_dir.to_path_buf();
-        let join = tokio::task::spawn_blocking(move || {
-            let r = cam.capture(params);
-            if let Ok(frame) = &r {
-                let (fw, fh) = frame.image.dimensions();
-                // Label the dark with what the driver actually captured, not
-                // what we asked for: authoritative whether or not this driver
-                // clamps internally.
-                if let Err(e) = crate::darks::add_entry(
-                    &data_dir_owned,
-                    driver,
-                    fw,
-                    fh,
-                    frame.exposure_us,
-                    frame.gain,
-                    &frame.image,
-                    frame.timestamp,
-                ) {
-                    tracing::warn!(
-                        "saving dark ({}us, gain {}): {e:#}",
-                        frame.exposure_us,
-                        frame.gain
-                    );
+    // Each sweep point is a median STACK of frames, not a single shot: one
+    // dark's random read noise (or a lone cosmic-ray hit) would otherwise be
+    // subtracted into every corrected light frame forever. Progress counts
+    // individual frames across the whole sweep so the bar moves smoothly
+    // even though points now take several captures each.
+    let counts: Vec<usize> = targets
+        .iter()
+        .map(|(exposure_us, _)| crate::darks::stack_count(*exposure_us))
+        .collect();
+    let total = counts.iter().sum::<usize>() as u32;
+    let mut frames_done: u32 = 0;
+    for ((exposure_us, gain), count) in targets.into_iter().zip(counts) {
+        let mut stack: Vec<RgbImage> = Vec::with_capacity(count);
+        // Label the dark with what the driver actually captured, not what we
+        // asked for: authoritative whether or not this driver clamps
+        // internally. All stack frames use identical params, so the first
+        // frame's echo speaks for the whole stack.
+        let mut actual: Option<(u64, f64, DateTime<Utc>)> = None;
+        for _ in 0..count {
+            frames_done += 1;
+            let _ = progress_tx.send(Some(crate::darks::DarksProgress {
+                current: frames_done,
+                total,
+            }));
+            let params = CaptureParams { exposure_us, gain };
+            let join = tokio::task::spawn_blocking(move || {
+                let r = cam.capture(params);
+                (r, cam)
+            })
+            .await;
+            let (result, cam_back) = match join {
+                Ok(pair) => pair,
+                Err(join_err) => {
+                    tracing::error!("darks sweep aborted: capture task panicked: {join_err}");
+                    let _ = progress_tx.send(None);
+                    return;
+                }
+            };
+            cam = cam_back;
+            match result {
+                Ok(frame) => {
+                    actual.get_or_insert((frame.exposure_us, frame.gain, frame.timestamp));
+                    stack.push(frame.image);
+                }
+                Err(e) => {
+                    tracing::warn!("dark capture failed ({exposure_us}us, gain {gain}): {e}");
                 }
             }
-            (r, cam)
+        }
+        let Some((actual_exposure_us, actual_gain, captured_at)) = actual else {
+            continue; // every frame of this point failed — skip it, keep sweeping
+        };
+        // Median + library write are real CPU/disk work — off the async task,
+        // same discipline as the captures themselves.
+        let data_dir_owned = data_dir.to_path_buf();
+        let write = tokio::task::spawn_blocking(move || {
+            let Some(master) = crate::darks::stack_master(&stack) else {
+                tracing::warn!(
+                    "dark stack unusable ({actual_exposure_us}us, gain {actual_gain}): \
+                     empty or mismatched frame sizes"
+                );
+                return;
+            };
+            let (fw, fh) = master.dimensions();
+            if let Err(e) = crate::darks::add_entry(
+                &data_dir_owned,
+                driver,
+                fw,
+                fh,
+                actual_exposure_us,
+                actual_gain,
+                &master,
+                captured_at,
+            ) {
+                tracing::warn!("saving dark ({actual_exposure_us}us, gain {actual_gain}): {e:#}");
+            }
         })
         .await;
-        let (result, cam_back) = match join {
-            Ok(pair) => pair,
-            Err(join_err) => {
-                tracing::error!("darks sweep aborted: capture task panicked: {join_err}");
-                let _ = progress_tx.send(None);
-                return;
-            }
-        };
-        cam = cam_back;
-        if let Err(e) = result {
-            tracing::warn!("dark capture failed ({exposure_us}us, gain {gain}): {e}");
+        if let Err(join_err) = write {
+            tracing::error!("darks sweep aborted: stacking task panicked: {join_err}");
+            let _ = progress_tx.send(None);
+            return;
         }
     }
     let _ = progress_tx.send(None);
@@ -1024,7 +1072,13 @@ mod tests {
         cfg.settings.camera.driver = crate::settings::CameraDriver::Mock;
         cfg.settings.camera.interval_sec_day = 1;
         cfg.settings.camera.interval_sec_night = 1;
-        cfg.settings.camera.capture_during_day = true; // test must not depend on wall clock
+        // Tests must not depend on wall clock: capture_during_day defeats
+        // the day-pause, and manual exposure defeats auto-exposure hunting —
+        // the mock renders a real day/night sky from the actual clock, so
+        // with AE on, convergence time (and thus when the first frame
+        // persists) would vary with the hour the suite happens to run at.
+        cfg.settings.camera.capture_during_day = true;
+        cfg.settings.camera.auto_exposure = false;
         cfg
     }
 
@@ -1231,7 +1285,10 @@ mod tests {
 
         ch.darks_cmd.send(()).await.unwrap();
 
-        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        // 60 s, not 20: the sweep now captures a full stack per point (40 mock
+        // frames total) plus per-point stacking — under parallel test load the
+        // old 20 s budget was close enough to flake.
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
             loop {
                 ch.darks_progress.changed().await.unwrap();
                 if ch.darks_progress.borrow().is_none() {
@@ -1240,12 +1297,19 @@ mod tests {
             }
         })
         .await
-        .expect("darks sweep did not finish within 20s");
+        .expect("darks sweep did not finish within 60s");
 
         let lib_dir =
             crate::darks::library_dir(dir.path(), crate::settings::CameraDriver::Mock, 1280, 960);
         let lib = crate::darks::load_manifest(&lib_dir);
-        assert_eq!(lib.entries.len(), 15);
+        // Default config: apply thresholds gain>=15 / exp>=10s with exposure
+        // ceiling 10s and gains {1, 8.5, 16} — the whole grid collapses to
+        // the single appliable point (10s, gain 16), stacked into one master.
+        assert_eq!(lib.entries.len(), 1);
+        assert_eq!(
+            (lib.entries[0].exposure_us, lib.entries[0].gain),
+            (10_000_000, 16.0)
+        );
         for entry in &lib.entries {
             assert!(lib_dir.join(&entry.file).exists());
         }
@@ -1305,7 +1369,10 @@ mod tests {
         // Only the sweep itself ever sends on this channel, so any None we
         // observe here is its own end-of-sweep clear, not the initial value.
         let mut observed: Vec<crate::darks::DarksProgress> = Vec::new();
-        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        // 60 s, not 20: the sweep now captures a full stack per point (40 mock
+        // frames total) plus per-point stacking — under parallel test load the
+        // old 20 s budget was close enough to flake.
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
             loop {
                 ch.darks_progress.changed().await.unwrap();
                 match *ch.darks_progress.borrow() {
@@ -1315,15 +1382,17 @@ mod tests {
             }
         })
         .await
-        .expect("darks sweep did not finish within 20s");
+        .expect("darks sweep did not finish within 60s");
 
-        // 5 exposures x 3 gains collapses to {1s, 2s} x {gain 1, gain 8}, and
-        // progress counts 1/4..4/4 — never the 0-indexed 0/4.
+        // The apply-threshold filter reduces the default grid to the single
+        // point (10s, gain 16), which this camera's narrow limits then clamp
+        // to (2s, gain 8) — a 10-frame stack, so progress counts frames
+        // 1/10..10/10, never a 0-indexed 0/10.
         assert!(!observed.is_empty(), "no progress update was observed");
         assert!(
             observed
                 .iter()
-                .all(|p| p.total == 4 && (1..=p.total).contains(&p.current)),
+                .all(|p| p.total == 10 && (1..=p.total).contains(&p.current)),
             "{observed:?}"
         );
 
@@ -1336,17 +1405,10 @@ mod tests {
             .map(|e| (e.exposure_us, e.gain))
             .collect();
         got.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        // Exposures are the *returned* halves of the clamped requests, and
-        // the out-of-range gain 16 (midpoint 8.5 too) landed on the cap of 8.
-        assert_eq!(
-            got,
-            vec![
-                (500_000, 1.0),
-                (500_000, 8.0),
-                (1_000_000, 1.0),
-                (1_000_000, 8.0)
-            ]
-        );
+        // The one appliable point (10s, gain 16) clamps to this camera's
+        // (2s, gain 8), and the entry is labeled with the *returned* half of
+        // the clamped exposure — actual values, not requested ones.
+        assert_eq!(got, vec![(1_000_000, 8.0)]);
     }
 
     #[tokio::test]

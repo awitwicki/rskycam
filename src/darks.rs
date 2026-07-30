@@ -89,6 +89,99 @@ pub fn sweep_targets(gain_min: f64, gain_max: f64) -> Vec<(u64, f64)> {
     targets
 }
 
+/// Trim a sweep to the points that can ever actually be SUBTRACTED, given
+/// the configured apply thresholds and the configured exposure ceiling:
+/// exposures are capped at `exposure_us_cap` (frames can never expose
+/// longer, so a longer dark would just soak sweep time), then any point
+/// below `min_exposure_us_to_apply`/`min_gain_to_apply` is dropped — the
+/// apply gate would never let it match a real frame. Sorted and deduped
+/// (capping typically collapses several exposures onto the cap). May return
+/// an empty list when the thresholds exclude everything — the caller
+/// decides what a sensible fallback is.
+pub fn appliable_targets(
+    targets: Vec<(u64, f64)>,
+    settings: &DarkFrameSettings,
+    exposure_us_cap: u64,
+) -> Vec<(u64, f64)> {
+    let mut out: Vec<(u64, f64)> = targets
+        .into_iter()
+        .map(|(exposure_us, gain)| (exposure_us.min(exposure_us_cap), gain))
+        .filter(|&(exposure_us, gain)| {
+            exposure_us >= settings.min_exposure_us_to_apply && gain >= settings.min_gain_to_apply
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    out.dedup();
+    out
+}
+
+/// How many frames to capture and median-stack for one sweep point. A
+/// single dark stamps its own random read noise (and any one-off cosmic-ray
+/// hit) into every corrected light frame; a median stack keeps only the
+/// repeatable fixed pattern. Sized by a per-point time budget (~2 minutes)
+/// so short exposures get the full 10-frame stack while a 60 s dark doesn't
+/// balloon the sweep — never fewer than 3, the minimum for a median to
+/// reject a single outlier frame.
+pub fn stack_count(exposure_us: u64) -> usize {
+    // ~3.3 min per point: with the sweep trimmed to only appliable points
+    // (typically 1-2 of them) a full 10-frame stack at a 20 s exposure is
+    // affordable, and more samples directly improve how well the master
+    // captures blinky (telegraph-noise) pixels.
+    const BUDGET_US: u64 = 200_000_000;
+    ((BUDGET_US / exposure_us.max(1)) as usize).clamp(3, 10)
+}
+
+/// Combine equally-sized frames into one master dark: per pixel/channel,
+/// reject the single lowest and single highest sample and average the rest
+/// (min/max-clipped mean — for a 3-frame stack this IS the median). One
+/// outlier sample per pixel (a cosmic-ray hit, a read-noise spike in one
+/// frame) is discarded outright instead of bleeding into the master, which
+/// is the entire reason to stack rather than keep a single shot. Stacks of
+/// fewer than 3 frames (captures failed mid-point) fall back to a plain
+/// mean — no room to clip. Returns `None` for an empty stack or mismatched
+/// dimensions (a mid-sweep resolution change; blending different sizes
+/// would be garbage).
+pub fn stack_master(frames: &[RgbImage]) -> Option<RgbImage> {
+    let first = frames.first()?;
+    let (w, h) = first.dimensions();
+    if frames.iter().any(|f| f.dimensions() != (w, h)) {
+        return None;
+    }
+    let len = (w * h * 3) as usize;
+    let mut sum = vec![0u32; len];
+    let mut min = vec![255u8; len];
+    let mut max = vec![0u8; len];
+    for f in frames {
+        for (i, &v) in f.as_raw().iter().enumerate() {
+            sum[i] += u32::from(v);
+            if v < min[i] {
+                min[i] = v;
+            }
+            if v > max[i] {
+                max[i] = v;
+            }
+        }
+    }
+    let n = frames.len() as u32;
+    let out: Vec<u8> = if n >= 3 {
+        let kept = n - 2;
+        sum.iter()
+            .zip(&min)
+            .zip(&max)
+            .map(|((&s, &lo), &hi)| {
+                let clipped = s - u32::from(lo) - u32::from(hi);
+                ((clipped + kept / 2) / kept) as u8
+            })
+            .collect()
+    } else {
+        sum.iter().map(|&s| ((s + n / 2) / n) as u8).collect()
+    };
+    RgbImage::from_raw(w, h, out)
+}
+
 /// Relative distance over (exposure_us, gain): each axis is normalized by
 /// its own magnitude before summing, so the two axes stay comparable
 /// despite very different scales (exposure in microseconds up to
@@ -124,6 +217,90 @@ pub fn subtract_dark(img: &mut RgbImage, dark: &RgbImage) {
     for (px, dpx) in img.pixels_mut().zip(dark.pixels()) {
         for c in 0..3 {
             px.0[c] = px.0[c].saturating_sub(dpx.0[c]);
+        }
+    }
+}
+
+/// Hot-pixel cutoff for a master dark: its median luma (the ordinary
+/// dark-current pedestal) plus this margin. Pixels above it are treated as
+/// defective and REPAIRED (replaced by neighbors) rather than merely
+/// subtracted — see `repair_hot_pixels`.
+const HOT_PIXEL_MARGIN: u8 = 25;
+
+fn luma(px: &image::Rgb<u8>) -> u8 {
+    // Same Rec.601 weighting as camera::mean_brightness, in integer math.
+    ((u32::from(px.0[0]) * 299 + u32::from(px.0[1]) * 587 + u32::from(px.0[2]) * 114) / 1000) as u8
+}
+
+fn median_luma(img: &RgbImage) -> u8 {
+    let mut hist = [0u32; 256];
+    for px in img.pixels() {
+        hist[luma(px) as usize] += 1;
+    }
+    let half = (img.width() * img.height()).div_ceil(2);
+    let mut seen = 0u32;
+    for (v, &count) in hist.iter().enumerate() {
+        seen += count;
+        if seen >= half {
+            return v as u8;
+        }
+    }
+    255
+}
+
+/// Replace every pixel the master dark marks as hot (well above the dark's
+/// own pedestal) with the median of its non-hot 8-neighbors in the light
+/// frame. Subtraction alone underestimates blinking (telegraph-noise)
+/// pixels: the stack's clipped mean averages a sometimes-on defect down to
+/// a fraction of its lit brightness, so subtracting leaves a bright
+/// residual at exactly the same position every frame. Replacement removes
+/// the defect completely regardless of how bright it happened to be in
+/// this particular frame — the standard hot-pixel treatment in allsky
+/// stacks. Pixels whose neighbors are all hot too are left as-is (a
+/// defective cluster has no clean data to borrow).
+pub fn repair_hot_pixels(img: &mut RgbImage, dark: &RgbImage) {
+    if img.dimensions() != dark.dimensions() {
+        return;
+    }
+    let cutoff = median_luma(dark).saturating_add(HOT_PIXEL_MARGIN);
+    let (w, h) = img.dimensions();
+    let hot: Vec<bool> = dark.pixels().map(|p| luma(p) >= cutoff).collect();
+    let src = img.clone(); // repairs read the original, not partial repairs
+    let mut neighbor_vals: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for y in 0..h {
+        for x in 0..w {
+            if !hot[(y * w + x) as usize] {
+                continue;
+            }
+            for v in &mut neighbor_vals {
+                v.clear();
+            }
+            for dy in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+                    if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 {
+                        continue;
+                    }
+                    if hot[(ny as u64 * u64::from(w) + nx as u64) as usize] {
+                        continue;
+                    }
+                    let np = src.get_pixel(nx as u32, ny as u32);
+                    for (vals, &v) in neighbor_vals.iter_mut().zip(&np.0) {
+                        vals.push(v);
+                    }
+                }
+            }
+            if neighbor_vals[0].is_empty() {
+                continue; // fully hot neighborhood — nothing clean to copy
+            }
+            let px = img.get_pixel_mut(x, y);
+            for c in 0..3 {
+                neighbor_vals[c].sort_unstable();
+                px.0[c] = neighbor_vals[c][neighbor_vals[c].len() / 2];
+            }
         }
     }
 }
@@ -180,6 +357,7 @@ pub fn apply_if_available(
         return;
     };
     subtract_dark(img, &dark);
+    repair_hot_pixels(img, &dark);
 }
 
 /// Writes one captured dark image to the library directory and updates the
@@ -241,6 +419,133 @@ mod tests {
             min_gain_to_apply: 15.0,
             min_exposure_us_to_apply: 10_000_000,
         }
+    }
+
+    #[test]
+    fn appliable_targets_keeps_only_points_the_apply_gate_can_use() {
+        // The real deployed scenario: ASI gain range 1..100, apply thresholds
+        // gain>=15 / exp>=10s, configured exposure ceiling 20s. All five
+        // sweep exposures cap/collapse onto 20s, gain 1 drops out — leaving
+        // exactly the two darks that can ever be subtracted, including the
+        // (20s, max gain) one the whole feature exists for.
+        let settings = DarkFrameSettings {
+            enabled: true,
+            min_gain_to_apply: 15.0,
+            min_exposure_us_to_apply: 10_000_000,
+        };
+        let got = appliable_targets(sweep_targets(1.0, 100.0), &settings, 20_000_000);
+        assert_eq!(got, vec![(20_000_000, 50.5), (20_000_000, 100.0)]);
+    }
+
+    #[test]
+    fn appliable_targets_is_empty_when_thresholds_exclude_the_whole_grid() {
+        let settings = DarkFrameSettings {
+            enabled: true,
+            min_gain_to_apply: 500.0, // above every swept gain
+            min_exposure_us_to_apply: 10_000_000,
+        };
+        assert!(appliable_targets(sweep_targets(1.0, 100.0), &settings, 20_000_000).is_empty());
+    }
+
+    #[test]
+    fn stack_count_fits_the_time_budget_and_clamps_to_3_10() {
+        assert_eq!(stack_count(500_000), 10); // 0.5s — budget allows far more, capped
+        assert_eq!(stack_count(20_000_000), 10); // 20s → 200/20, right at the cap
+        assert_eq!(stack_count(60_000_000), 3); // 60s → 3 by budget, also the floor
+    }
+
+    #[test]
+    fn repair_replaces_hot_pixels_with_neighbor_median_even_when_blinking_brighter() {
+        // Master dark: flat pedestal 30 with one hot pixel at (2,2).
+        let mut dark = RgbImage::from_pixel(5, 5, Rgb([30, 30, 30]));
+        dark.put_pixel(2, 2, Rgb([120, 120, 120]));
+
+        // Light frame: uniform sky 80, but the defect is currently blinking
+        // FULL brightness (250) — much brighter than the master's 120, so
+        // subtraction alone would leave a bright 130 residual.
+        let mut light = RgbImage::from_pixel(5, 5, Rgb([80, 80, 80]));
+        light.put_pixel(2, 2, Rgb([250, 250, 250]));
+
+        subtract_dark(&mut light, &dark);
+        repair_hot_pixels(&mut light, &dark);
+
+        // Non-hot pixels: plain subtraction (80 - 30).
+        assert_eq!(light.get_pixel(0, 0).0, [50, 50, 50]);
+        // The hot pixel matches its neighbors instead of showing a residual.
+        assert_eq!(light.get_pixel(2, 2).0, [50, 50, 50]);
+    }
+
+    #[test]
+    fn repair_leaves_frames_alone_when_the_dark_has_no_hot_pixels() {
+        let dark = RgbImage::from_pixel(4, 4, Rgb([35, 35, 35])); // pure pedestal
+        let mut light = RgbImage::from_pixel(4, 4, Rgb([90, 90, 90]));
+        let before = light.clone();
+        repair_hot_pixels(&mut light, &dark);
+        assert_eq!(light, before);
+    }
+
+    #[test]
+    fn repair_skips_pixels_whose_whole_neighborhood_is_hot() {
+        // Every dark pixel is far above its own median? No — median adapts.
+        // Make a 3x3 fully-hot cluster inside a larger pedestal so the
+        // cluster's center has no clean neighbor to borrow from.
+        let mut dark = RgbImage::from_pixel(7, 7, Rgb([20, 20, 20]));
+        for y in 2..5 {
+            for x in 2..5 {
+                dark.put_pixel(x, y, Rgb([200, 200, 200]));
+            }
+        }
+        let mut light = RgbImage::from_pixel(7, 7, Rgb([220, 220, 220]));
+        subtract_dark(&mut light, &dark);
+        let center_after_subtract = light.get_pixel(3, 3).0;
+        repair_hot_pixels(&mut light, &dark);
+        // Edge-of-cluster pixels have clean neighbors and get repaired to
+        // the surrounding value; the center has none and stays subtracted.
+        assert_eq!(light.get_pixel(2, 2).0, [200, 200, 200]); // 220-20 neighbors
+        assert_eq!(light.get_pixel(3, 3).0, center_after_subtract);
+    }
+
+    #[test]
+    fn stack_master_rejects_a_single_outlier_sample() {
+        // Nine frames agree on 10; one carries a cosmic-ray-style 255 spike.
+        // The min/max clip must drop the spike (and one 10 as the min),
+        // leaving the master at exactly 10 — a plain mean would read ~34.
+        let mut frames = vec![RgbImage::from_pixel(4, 3, Rgb([10, 10, 10])); 9];
+        frames.push(RgbImage::from_pixel(4, 3, Rgb([255, 255, 255])));
+        let master = stack_master(&frames).unwrap();
+        assert!(master.pixels().all(|p| p.0 == [10, 10, 10]));
+    }
+
+    #[test]
+    fn stack_master_of_three_is_the_median() {
+        let frames = vec![
+            RgbImage::from_pixel(2, 2, Rgb([5, 5, 5])),
+            RgbImage::from_pixel(2, 2, Rgb([20, 20, 20])),
+            RgbImage::from_pixel(2, 2, Rgb([200, 200, 200])),
+        ];
+        let master = stack_master(&frames).unwrap();
+        assert!(master.pixels().all(|p| p.0 == [20, 20, 20]));
+    }
+
+    #[test]
+    fn stack_master_of_fewer_than_three_falls_back_to_the_mean() {
+        let frames = vec![
+            RgbImage::from_pixel(2, 2, Rgb([10, 10, 10])),
+            RgbImage::from_pixel(2, 2, Rgb([20, 20, 20])),
+        ];
+        let master = stack_master(&frames).unwrap();
+        assert!(master.pixels().all(|p| p.0 == [15, 15, 15]));
+    }
+
+    #[test]
+    fn stack_master_rejects_empty_or_mismatched_stacks() {
+        assert!(stack_master(&[]).is_none());
+        let mismatched = vec![
+            RgbImage::from_pixel(2, 2, Rgb([10, 10, 10])),
+            RgbImage::from_pixel(3, 2, Rgb([10, 10, 10])),
+            RgbImage::from_pixel(2, 2, Rgb([10, 10, 10])),
+        ];
+        assert!(stack_master(&mismatched).is_none());
     }
 
     #[test]

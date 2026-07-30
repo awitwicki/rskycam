@@ -283,7 +283,9 @@ export default function SettingsPage() {
             <h2 className="font-mono text-base">Capture dark sweep?</h2>
             <p className="mt-2 text-sm text-fgdim">
               Cover the lens completely before starting — no light should reach the sensor.
-              This takes about 5 minutes and pauses normal capture.
+              Only exposure/gain points above the apply thresholds are swept,
+              several frames stacked into a master dark each — usually a few
+              minutes. Pauses normal capture.
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setConfirmSweep(false)}>Cancel</Button>
