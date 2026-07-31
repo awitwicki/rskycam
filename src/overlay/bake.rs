@@ -201,6 +201,8 @@ mod tests {
             grid_opacity: Some(s.overlay.grid_opacity),
             image_width: 1280,
             image_height: 960,
+            native_width: 1280,
+            mask: None,
         });
         let mut img = black(1280, 960);
         bake_overlay(&mut img, &g);

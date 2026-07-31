@@ -2,7 +2,7 @@ import type {
   CropRect, LensCalibration, LocationSettings, OverlayGeometry, OverlayLabel,
   OverlayLayers, OverlayPolyline,
 } from '../api/types'
-import { altAzToImage, lstDeg, raDecToAltAz } from './astro'
+import { altAzToImage, lstDeg, raDecToAltAz, thetaMaxDeg, type LensView } from './astro'
 
 /** Shift sensor-space geometry into cropped-image coordinates. */
 export function cropGeometry(g: OverlayGeometry, crop: CropRect): OverlayGeometry {
@@ -17,6 +17,13 @@ export function cropGeometry(g: OverlayGeometry, crop: CropRect): OverlayGeometr
   }
 }
 
+/** Manual fisheye mask circle in sensor-frame pixels. */
+export interface MaskCircle {
+  centerXPx: number
+  centerYPx: number
+  radiusPx: number
+}
+
 export interface BuildOverlayOptions {
   time: Date
   location: LocationSettings
@@ -25,18 +32,29 @@ export interface BuildOverlayOptions {
   gridOpacity?: number // stamped onto altAz/raDec polylines
   imageWidth: number
   imageHeight: number
+  /** Native sensor width for plate scale; defaults to imageWidth (binning 1). */
+  nativeWidth?: number
+  /** When set, grid lines are culled outside this circle: the mask covers
+   *  the grid, never the other way around. Labels are left alone. */
+  mask?: MaskCircle
 }
 
 const MIN_ALT_RADEC = 2
 
-/** Split a sampled line into segments that stay above the horizon. */
-function segmentsAboveHorizon(
-  samples: { altDeg: number; x: number; y: number }[],
+interface VisSample { altDeg: number; thetaDeg: number; x: number; y: number }
+
+/** Split a sampled line into segments inside the usable field of view:
+ *  θ ≤ thetaMax, (when minAlt is set) above the horizon, and (when a mask
+ *  circle is set) inside the mask. */
+function visibleSegments(
+  samples: VisSample[], minAlt: number | null, thetaMax: number, mask?: MaskCircle,
 ): [number, number][][] {
   const segs: [number, number][][] = []
   let cur: [number, number][] = []
+  const inMask = (s: VisSample) => mask === undefined
+    || (s.x - mask.centerXPx) ** 2 + (s.y - mask.centerYPx) ** 2 <= mask.radiusPx ** 2
   for (const s of samples) {
-    if (s.altDeg >= MIN_ALT_RADEC) {
+    if ((minAlt === null || s.altDeg >= minAlt) && s.thetaDeg <= thetaMax && inMask(s)) {
       cur.push([s.x, s.y])
     } else {
       if (cur.length > 1) segs.push(cur)
@@ -49,6 +67,12 @@ function segmentsAboveHorizon(
 
 export function buildOverlayGeometry(o: BuildOverlayOptions): OverlayGeometry {
   const { calibration: cal, layers } = o
+  const view: LensView = {
+    frameWidth: o.imageWidth,
+    frameHeight: o.imageHeight,
+    nativeWidth: o.nativeWidth ?? o.imageWidth,
+  }
+  const thetaMax = thetaMaxDeg(cal.lensType)
   const polylines: OverlayPolyline[] = []
   const labels: OverlayLabel[] = []
 
@@ -56,27 +80,28 @@ export function buildOverlayGeometry(o: BuildOverlayOptions): OverlayGeometry {
 
   if (layers.altAzGrid) {
     for (const alt of [0, 30, 60]) {
-      const points: [number, number][] = []
+      const samples: VisSample[] = []
       for (let az = 0; az <= 360; az += 5) {
-        const p = altAzToImage(alt, az, cal)
-        points.push([p.x, p.y])
+        const p = altAzToImage(alt, az, cal, view)
+        samples.push({ altDeg: alt, thetaDeg: p.thetaDeg, x: p.x, y: p.y })
       }
-      polylines.push({ layer: 'altAz', points, opacity })
+      for (const points of visibleSegments(samples, null, thetaMax, o.mask)) polylines.push({ layer: 'altAz', points, opacity })
     }
     for (let az = 0; az < 360; az += 45) {
-      const points: [number, number][] = []
+      const samples: VisSample[] = []
       for (let alt = 0; alt <= 80; alt += 5) {
-        const p = altAzToImage(alt, az, cal)
-        points.push([p.x, p.y])
+        const p = altAzToImage(alt, az, cal, view)
+        samples.push({ altDeg: alt, thetaDeg: p.thetaDeg, x: p.x, y: p.y })
       }
-      polylines.push({ layer: 'altAz', points, opacity })
+      for (const points of visibleSegments(samples, null, thetaMax, o.mask)) polylines.push({ layer: 'altAz', points, opacity })
     }
   }
 
   if (layers.cardinal) {
     const cardinals: [string, number][] = [['N', 0], ['E', 90], ['S', 180], ['W', 270]]
     for (const [text, az] of cardinals) {
-      const p = altAzToImage(-8, az, cal) // a bit outside the horizon circle
+      const p = altAzToImage(-8, az, cal, view) // a bit outside the horizon circle
+      if (p.thetaDeg > thetaMax) continue
       labels.push({ layer: 'cardinal', text, x: p.x, y: p.y, fontSize: 28 })
     }
   }
@@ -84,23 +109,23 @@ export function buildOverlayGeometry(o: BuildOverlayOptions): OverlayGeometry {
   if (layers.raDecGrid) {
     const lst = lstDeg(o.time, o.location.longitudeDeg)
     const lat = o.location.latitudeDeg
-    const sample = (raDeg: number, decDeg: number) => {
+    const sample = (raDeg: number, decDeg: number): VisSample => {
       const { altDeg, azDeg } = raDecToAltAz(raDeg, decDeg, lat, lst)
-      const { x, y } = altAzToImage(altDeg, azDeg, cal)
-      return { altDeg, x, y }
+      const { x, y, thetaDeg } = altAzToImage(altDeg, azDeg, cal, view)
+      return { altDeg, thetaDeg, x, y }
     }
     // ±80 keeps a small circle around each celestial pole so the grid
     // doesn't leave a hole there.
     for (const dec of [-80, -60, -30, 0, 30, 60, 80]) {
-      const samples = []
+      const samples: VisSample[] = []
       for (let ra = 0; ra <= 360; ra += 3) samples.push(sample(ra, dec))
-      for (const points of segmentsAboveHorizon(samples)) polylines.push({ layer: 'raDec', points, opacity })
+      for (const points of visibleSegments(samples, MIN_ALT_RADEC, thetaMax, o.mask)) polylines.push({ layer: 'raDec', points, opacity })
     }
     // Meridians run to dec ±90 so they converge exactly at the poles.
     for (let ra = 0; ra < 360; ra += 30) {
-      const samples = []
+      const samples: VisSample[] = []
       for (let dec = -90; dec <= 90; dec += 3) samples.push(sample(ra, dec))
-      for (const points of segmentsAboveHorizon(samples)) polylines.push({ layer: 'raDec', points, opacity })
+      for (const points of visibleSegments(samples, MIN_ALT_RADEC, thetaMax, o.mask)) polylines.push({ layer: 'raDec', points, opacity })
     }
   }
 

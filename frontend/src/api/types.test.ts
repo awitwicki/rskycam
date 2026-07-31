@@ -52,11 +52,18 @@ describe('api contract', () => {
         captureDuringDay: false,
         captureWidth: 1640, captureHeight: 1232,
       },
-      image: { maskMode: 'circle', crop: { x: 160, y: 120, width: 960, height: 720 } },
+      image: {
+        maskMode: 'circle', maskCenterXPx: 640, maskCenterYPx: 480, maskRadiusPx: 620,
+        crop: { x: 160, y: 120, width: 960, height: 720 },
+      },
       location: { latitudeDeg: 50.45, longitudeDeg: 30.52 },
       sensor: { enabled: true },
       overlay: {
-        calibration: { cx: 480, cy: 480, radiusPx: 440, rotationDeg: 0, flip: false },
+        calibration: {
+          lensType: 'fisheye', focalLengthMm: 1.8, pixelSizeUm: 1.12,
+          pointingAzDeg: 0, pointingAltDeg: 90, rollDeg: 0, flip: false,
+          centerOffsetXPx: 0, centerOffsetYPx: 0,
+        },
         layers: { cardinal: true, altAzGrid: true, raDecGrid: true },
         gridOpacity: 0.45,
         textFields: [{ id: 'time', kind: 'time', x: 24, y: 40, fontSize: 24 }],
@@ -70,7 +77,9 @@ describe('api contract', () => {
     expect(st.camera.driver).toBe('mock')
     expect(st.image.maskMode).toBe('circle')
 
-    const noMaskNoCrop: Settings['image'] = { maskMode: 'none', crop: null }
+    const noMaskNoCrop: Settings['image'] = {
+      maskMode: 'none', maskCenterXPx: 640, maskCenterYPx: 480, maskRadiusPx: 620, crop: null,
+    }
     expect(noMaskNoCrop.crop).toBeNull()
   })
 })

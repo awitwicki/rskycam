@@ -1,10 +1,22 @@
 import { describe, it, expect } from 'vitest'
 import {
   altAzToImage, altitudeOf, gmstDeg, julianDate, moonEquatorial,
-  moonIllumination, raDecToAltAz, sunEquatorial,
+  moonIllumination, raDecToAltAz, sunEquatorial, thetaToRadiusPx,
 } from './astro'
+import type { LensCalibration } from '../api/types'
 
-const cal = { cx: 480, cy: 480, radiusPx: 440, rotationDeg: 0, flip: false }
+const cal: LensCalibration = {
+  lensType: 'fisheye' as const,
+  focalLengthMm: 0.88 / Math.PI, // fPx = 880/π → horizon at 440 px
+  pixelSizeUm: 1,
+  pointingAzDeg: 0,
+  pointingAltDeg: 90,
+  rollDeg: 0,
+  flip: false,
+  centerOffsetXPx: 0,
+  centerOffsetYPx: 0,
+}
+const view = { frameWidth: 960, frameHeight: 960, nativeWidth: 960 }
 
 describe('astro', () => {
   it('computes JD and GMST at the J2000 epoch', () => {
@@ -27,30 +39,63 @@ describe('astro', () => {
   })
 
   it('zenith projects to the lens center regardless of azimuth', () => {
-    const p = altAzToImage(90, 123, cal)
+    const p = altAzToImage(90, 123, cal, view)
     expect(p.x).toBeCloseTo(480)
     expect(p.y).toBeCloseTo(480)
   })
 
-  it('horizon N projects straight up, E straight right', () => {
-    const n = altAzToImage(0, 0, cal)
+  it('horizon N projects straight up, E straight right (legacy vectors)', () => {
+    const n = altAzToImage(0, 0, cal, view)
     expect(n.x).toBeCloseTo(480)
-    expect(n.y).toBeCloseTo(480 - 440)
-    const e = altAzToImage(0, 90, cal)
-    expect(e.x).toBeCloseTo(480 + 440)
+    expect(n.y).toBeCloseTo(40)
+    expect(n.thetaDeg).toBeCloseTo(90)
+    const e = altAzToImage(0, 90, cal, view)
+    expect(e.x).toBeCloseTo(920)
     expect(e.y).toBeCloseTo(480)
   })
 
-  it('rotationDeg rotates north clockwise on the image', () => {
-    const n = altAzToImage(0, 0, { ...cal, rotationDeg: 90 })
-    expect(n.x).toBeCloseTo(480 + 440)
+  it('rollDeg rotates north clockwise on the image', () => {
+    const n = altAzToImage(0, 0, { ...cal, rollDeg: 90 }, view)
+    expect(n.x).toBeCloseTo(920)
     expect(n.y).toBeCloseTo(480)
   })
 
   it('flip mirrors east-west', () => {
-    const e = altAzToImage(0, 90, { ...cal, flip: true })
-    expect(e.x).toBeCloseTo(480 - 440)
+    const e = altAzToImage(0, 90, { ...cal, flip: true }, view)
+    expect(e.x).toBeCloseTo(40)
     expect(e.y).toBeCloseTo(480)
+  })
+
+  it('tilted pointing: pointing → center, zenith lands fPx·π/4 below', () => {
+    const c = { ...cal, pointingAzDeg: 180, pointingAltDeg: 45 }
+    const p = altAzToImage(45, 180, c, view)
+    expect(p.x).toBeCloseTo(480)
+    expect(p.y).toBeCloseTo(480)
+    const z = altAzToImage(90, 0, c, view)
+    expect(z.x).toBeCloseTo(480)
+    expect(z.y).toBeCloseTo(700)
+    expect(z.thetaDeg).toBeCloseTo(45)
+  })
+
+  it('rectilinear projects r = f·tan θ', () => {
+    const p = altAzToImage(45, 0, { ...cal, lensType: 'rectilinear' as const }, view)
+    expect(p.x).toBeCloseTo(480)
+    expect(p.y).toBeCloseTo(480 - 880 / Math.PI)
+  })
+
+  it('thetaToRadiusPx matches the lens mapping (Rust parity)', () => {
+    expect(thetaToRadiusPx(cal, view, 90)).toBeCloseTo(440, 6)
+    expect(thetaToRadiusPx(cal, view, 45)).toBeCloseTo(220, 6)
+    const rect = { ...cal, lensType: 'rectilinear' as const }
+    expect(thetaToRadiusPx(rect, view, 45)).toBeCloseTo(880 / Math.PI, 6)
+    expect(Number.isFinite(thetaToRadiusPx(rect, view, 90))).toBe(true)
+  })
+
+  it('binning: half-resolution frame halves the plate scale', () => {
+    const v = { frameWidth: 480, frameHeight: 480, nativeWidth: 960 }
+    const n = altAzToImage(0, 0, cal, v)
+    expect(n.x).toBeCloseTo(240)
+    expect(n.y).toBeCloseTo(20)
   })
 })
 

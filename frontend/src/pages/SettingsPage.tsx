@@ -132,7 +132,8 @@ export default function SettingsPage() {
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4">
-      <header className="flex items-center justify-between">
+      {/* Sticky so Save stays reachable however far the page scrolls. */}
+      <header className="sticky top-0 z-10 -my-2 flex items-center justify-between bg-night py-2">
         <h1 className="text-lg font-medium">Settings</h1>
         <div className="flex items-center gap-3">
           {saved && <span className="text-sm text-ok">Saved ✓</span>}

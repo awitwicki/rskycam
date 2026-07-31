@@ -3,7 +3,8 @@ use serde::Serialize;
 
 use crate::overlay::astro;
 use crate::settings::{
-    CropRect, LensCalibration, LocationSettings, OverlayLayers, OverlayTextField, TextFieldKind,
+    CropRect, ImageSettings, LensCalibration, LocationSettings, MaskMode, OverlayLayers,
+    OverlayTextField, TextFieldKind,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -36,6 +37,25 @@ pub struct OverlayGeometry {
     pub labels: Vec<OverlayLabel>,
 }
 
+/// Manual fisheye mask circle in sensor-frame pixels.
+#[derive(Clone, Copy, Debug)]
+pub struct MaskCircle {
+    pub center_x_px: f64,
+    pub center_y_px: f64,
+    pub radius_px: f64,
+}
+
+impl MaskCircle {
+    /// The manual mask circle, when the image settings enable one.
+    pub fn from_image(image: &ImageSettings) -> Option<Self> {
+        (image.mask_mode == MaskMode::Circle).then_some(Self {
+            center_x_px: image.mask_center_x_px,
+            center_y_px: image.mask_center_y_px,
+            radius_px: image.mask_radius_px,
+        })
+    }
+}
+
 pub struct BuildOptions<'a> {
     pub time: DateTime<Utc>,
     pub location: &'a LocationSettings,
@@ -44,16 +64,33 @@ pub struct BuildOptions<'a> {
     pub grid_opacity: Option<f64>,
     pub image_width: u32,
     pub image_height: u32,
+    /// Native sensor width for plate scale; == image_width when unknown.
+    pub native_width: u32,
+    /// When set, grid lines are culled outside this circle: the mask covers
+    /// the grid, never the other way around. Labels are left alone.
+    pub mask: Option<MaskCircle>,
 }
 
 const MIN_ALT_RADEC: f64 = 2.0;
 
-/// Split a sampled line into segments that stay above the horizon.
-fn segments_above_horizon(samples: &[(f64, f64, f64)]) -> Vec<Vec<[f64; 2]>> {
+/// Split a sampled line into segments inside the usable field of view:
+/// θ ≤ theta_max, (when min_alt is set) above the horizon, and (when a mask
+/// circle is set) inside the mask.
+fn visible_segments(
+    samples: &[(f64, f64, f64, f64)],
+    min_alt: Option<f64>,
+    theta_max: f64,
+    mask: Option<MaskCircle>,
+) -> Vec<Vec<[f64; 2]>> {
     let mut segs = Vec::new();
     let mut cur: Vec<[f64; 2]> = Vec::new();
-    for &(alt, x, y) in samples {
-        if alt >= MIN_ALT_RADEC {
+    let in_mask = |x: f64, y: f64| {
+        mask.is_none_or(|m| {
+            (x - m.center_x_px).powi(2) + (y - m.center_y_px).powi(2) <= m.radius_px.powi(2)
+        })
+    };
+    for &(alt, theta, x, y) in samples {
+        if min_alt.is_none_or(|m| alt >= m) && theta <= theta_max && in_mask(x, y) {
             cur.push([x, y]);
         } else {
             if cur.len() > 1 {
@@ -70,46 +107,59 @@ fn segments_above_horizon(samples: &[(f64, f64, f64)]) -> Vec<Vec<[f64; 2]>> {
 
 pub fn build_overlay_geometry(o: &BuildOptions) -> OverlayGeometry {
     let cal = o.calibration;
+    let view = astro::LensView {
+        frame_width: o.image_width,
+        frame_height: o.image_height,
+        native_width: o.native_width,
+    };
+    let theta_max = astro::theta_max_deg(cal.lens_type);
     let mut polylines = Vec::new();
     let mut labels = Vec::new();
     let opacity = o.grid_opacity;
 
     if o.layers.alt_az_grid {
         for alt in [0.0f64, 30.0, 60.0] {
-            let mut points = Vec::new();
+            let mut samples = Vec::new();
             let mut az = 0.0f64;
             while az <= 360.0 {
-                let p = astro::alt_az_to_image(alt, az, cal);
-                points.push([p.x, p.y]);
+                let p = astro::alt_az_to_image(alt, az, cal, &view);
+                samples.push((alt, p.theta_deg, p.x, p.y));
                 az += 5.0;
             }
-            polylines.push(OverlayPolyline {
-                layer: "altAz".into(),
-                points,
-                opacity,
-            });
+            for points in visible_segments(&samples, None, theta_max, o.mask) {
+                polylines.push(OverlayPolyline {
+                    layer: "altAz".into(),
+                    points,
+                    opacity,
+                });
+            }
         }
         let mut az = 0.0f64;
         while az < 360.0 {
-            let mut points = Vec::new();
+            let mut samples = Vec::new();
             let mut alt = 0.0f64;
             while alt <= 80.0 {
-                let p = astro::alt_az_to_image(alt, az, cal);
-                points.push([p.x, p.y]);
+                let p = astro::alt_az_to_image(alt, az, cal, &view);
+                samples.push((alt, p.theta_deg, p.x, p.y));
                 alt += 5.0;
             }
-            polylines.push(OverlayPolyline {
-                layer: "altAz".into(),
-                points,
-                opacity,
-            });
+            for points in visible_segments(&samples, None, theta_max, o.mask) {
+                polylines.push(OverlayPolyline {
+                    layer: "altAz".into(),
+                    points,
+                    opacity,
+                });
+            }
             az += 45.0;
         }
     }
 
     if o.layers.cardinal {
         for (text, az) in [("N", 0.0), ("E", 90.0), ("S", 180.0), ("W", 270.0)] {
-            let p = astro::alt_az_to_image(-8.0, az, cal); // a bit outside the horizon circle
+            let p = astro::alt_az_to_image(-8.0, az, cal, &view); // a bit outside the horizon circle
+            if p.theta_deg > theta_max {
+                continue;
+            }
             labels.push(OverlayLabel {
                 layer: "cardinal".into(),
                 text: text.into(),
@@ -124,10 +174,10 @@ pub fn build_overlay_geometry(o: &BuildOptions) -> OverlayGeometry {
     if o.layers.ra_dec_grid {
         let lst = astro::lst_deg(o.time, o.location.longitude_deg);
         let lat = o.location.latitude_deg;
-        let sample = |ra: f64, dec: f64| -> (f64, f64, f64) {
+        let sample = |ra: f64, dec: f64| -> (f64, f64, f64, f64) {
             let aa = astro::ra_dec_to_alt_az(ra, dec, lat, lst);
-            let p = astro::alt_az_to_image(aa.alt_deg, aa.az_deg, cal);
-            (aa.alt_deg, p.x, p.y)
+            let p = astro::alt_az_to_image(aa.alt_deg, aa.az_deg, cal, &view);
+            (aa.alt_deg, p.theta_deg, p.x, p.y)
         };
         // ±80 keeps a small circle around each celestial pole (no hole).
         for dec in [-80.0f64, -60.0, -30.0, 0.0, 30.0, 60.0, 80.0] {
@@ -137,7 +187,7 @@ pub fn build_overlay_geometry(o: &BuildOptions) -> OverlayGeometry {
                 samples.push(sample(ra, dec));
                 ra += 3.0;
             }
-            for points in segments_above_horizon(&samples) {
+            for points in visible_segments(&samples, Some(MIN_ALT_RADEC), theta_max, o.mask) {
                 polylines.push(OverlayPolyline {
                     layer: "raDec".into(),
                     points,
@@ -154,7 +204,7 @@ pub fn build_overlay_geometry(o: &BuildOptions) -> OverlayGeometry {
                 samples.push(sample(ra, dec));
                 dec += 3.0;
             }
-            for points in segments_above_horizon(&samples) {
+            for points in visible_segments(&samples, Some(MIN_ALT_RADEC), theta_max, o.mask) {
                 polylines.push(OverlayPolyline {
                     layer: "raDec".into(),
                     points,
@@ -270,11 +320,15 @@ mod tests {
                 longitude_deg: 30.52,
             },
             LensCalibration {
-                cx: 480.0,
-                cy: 480.0,
-                radius_px: 440.0,
-                rotation_deg: 0.0,
+                lens_type: crate::settings::LensType::Fisheye,
+                focal_length_mm: 0.88 / std::f64::consts::PI,
+                pixel_size_um: 1.0,
+                pointing_az_deg: 0.0,
+                pointing_alt_deg: 90.0,
+                roll_deg: 0.0,
                 flip: false,
+                center_offset_x_px: 0.0,
+                center_offset_y_px: 0.0,
             },
         )
     }
@@ -289,6 +343,8 @@ mod tests {
             grid_opacity,
             image_width: 960,
             image_height: 960,
+            native_width: 960,
+            mask: None,
         })
     }
 
@@ -351,7 +407,16 @@ mod tests {
         let (time, loc, cal) = base();
         let lst = astro::lst_deg(time, loc.longitude_deg);
         let ncp = astro::ra_dec_to_alt_az(0.0, 90.0, loc.latitude_deg, lst);
-        let pole = astro::alt_az_to_image(ncp.alt_deg, ncp.az_deg, &cal);
+        let pole = astro::alt_az_to_image(
+            ncp.alt_deg,
+            ncp.az_deg,
+            &cal,
+            &astro::LensView {
+                frame_width: 960,
+                frame_height: 960,
+                native_width: 960,
+            },
+        );
         let at_pole = g.polylines.iter().filter(|pl| {
             pl.points
                 .iter()
@@ -388,6 +453,77 @@ mod tests {
         let v = serde_json::to_value(&g).unwrap();
         assert!(v["imageWidth"].is_number());
         assert_eq!(v["polylines"][0]["opacity"], 0.3);
+    }
+
+    #[test]
+    fn mask_circle_culls_grid_points_outside_it_but_not_cardinal_labels() {
+        let layers = OverlayLayers {
+            alt_az_grid: true,
+            ra_dec_grid: true,
+            cardinal: true,
+        };
+        let mask = MaskCircle {
+            center_x_px: 500.0,
+            center_y_px: 460.0,
+            radius_px: 200.0,
+        };
+        let dist = |x: f64, y: f64| {
+            ((x - mask.center_x_px).powi(2) + (y - mask.center_y_px).powi(2)).sqrt()
+        };
+
+        let unmasked = build(layers, None);
+        assert!(unmasked
+            .polylines
+            .iter()
+            .any(|pl| pl.points.iter().any(|p| dist(p[0], p[1]) > mask.radius_px)));
+
+        let (time, loc, cal) = base();
+        let g = build_overlay_geometry(&BuildOptions {
+            time,
+            location: &loc,
+            calibration: &cal,
+            layers: &layers,
+            grid_opacity: None,
+            image_width: 960,
+            image_height: 960,
+            native_width: 960,
+            mask: Some(mask),
+        });
+        assert!(!g.polylines.is_empty());
+        for pl in &g.polylines {
+            assert!(pl.points.len() > 1);
+            for p in &pl.points {
+                assert!(dist(p[0], p[1]) <= mask.radius_px + 0.01);
+            }
+        }
+        // cardinal labels are annotations, not sky lines — the mask leaves them
+        let mut texts: Vec<_> = g.labels.iter().map(|l| l.text.as_str()).collect();
+        texts.sort_unstable();
+        assert_eq!(texts, ["E", "N", "S", "W"]);
+    }
+
+    #[test]
+    fn rectilinear_culls_the_horizon_circle() {
+        let (time, loc, mut cal) = base();
+        cal.lens_type = crate::settings::LensType::Rectilinear;
+        let g = build_overlay_geometry(&BuildOptions {
+            time,
+            location: &loc,
+            calibration: &cal,
+            layers: &OverlayLayers {
+                alt_az_grid: true,
+                ..NONE
+            },
+            grid_opacity: None,
+            image_width: 960,
+            image_height: 960,
+            native_width: 960,
+            mask: None,
+        });
+        // The alt-0 horizon circle sits at θ = 90° — beyond the 85°
+        // rectilinear limit — so only the alt 30/60 circles and the 8
+        // radials (their lowest points culled) survive: 2 + 8 = 10.
+        assert_eq!(g.polylines.len(), 10);
     }
 
     #[test]

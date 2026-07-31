@@ -5,7 +5,7 @@ pub mod rpicam;
 use chrono::{DateTime, Utc};
 use image::RgbImage;
 
-use crate::settings::{CropRect, LensCalibration};
+use crate::settings::CropRect;
 
 pub struct CameraInfo {
     // Reserved for future UI display (Phase 3); not read by the capture pipeline today.
@@ -62,12 +62,16 @@ pub fn mean_brightness(img: &RgbImage) -> f64 {
     sum / img.pixels().len() as f64
 }
 
-/// Black out everything outside the lens circle (maskMode = 'circle').
-pub fn apply_mask_circle(img: &mut RgbImage, cal: &LensCalibration) {
-    let r2 = cal.radius_px * cal.radius_px;
+/// Black out everything outside the manually placed mask circle
+/// (maskMode = 'circle'). Sensor-frame pixels, independent of the lens
+/// calibration — the user drags the circle in the editor.
+pub fn apply_mask_circle(img: &mut RgbImage, image: &crate::settings::ImageSettings) {
+    let (cx, cy) = (image.mask_center_x_px, image.mask_center_y_px);
+    let radius = image.mask_radius_px;
+    let r2 = radius * radius;
     for (x, y, px) in img.enumerate_pixels_mut() {
-        let dx = x as f64 - cal.cx;
-        let dy = y as f64 - cal.cy;
+        let dx = x as f64 - cx;
+        let dy = y as f64 - cy;
         if dx * dx + dy * dy > r2 {
             *px = image::Rgb([0, 0, 0]);
         }
@@ -94,7 +98,7 @@ pub fn encode_jpeg(img: &RgbImage) -> Result<Vec<u8>, CameraError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{CropRect, LensCalibration};
+    use crate::settings::CropRect;
     use image::RgbImage;
 
     #[test]
@@ -105,19 +109,36 @@ mod tests {
         assert!((mean_brightness(&gray) - 100.0).abs() < 0.6);
     }
 
+    fn mask_image(cx: f64, cy: f64, r: f64) -> crate::settings::ImageSettings {
+        crate::settings::ImageSettings {
+            mask_mode: crate::settings::MaskMode::Circle,
+            mask_center_x_px: cx,
+            mask_center_y_px: cy,
+            mask_radius_px: r,
+            crop: None,
+        }
+    }
+
     #[test]
     fn mask_circle_blacks_out_corners_keeps_center() {
         let mut img = RgbImage::from_pixel(100, 100, image::Rgb([200, 200, 200]));
-        let cal = LensCalibration {
-            cx: 50.0,
-            cy: 50.0,
-            radius_px: 40.0,
-            rotation_deg: 0.0,
-            flip: false,
-        };
-        apply_mask_circle(&mut img, &cal);
+        apply_mask_circle(&mut img, &mask_image(50.0, 50.0, 40.0));
         assert_eq!(img.get_pixel(0, 0).0, [0, 0, 0]);
         assert_eq!(img.get_pixel(50, 50).0, [200, 200, 200]);
+    }
+
+    #[test]
+    fn mask_circle_follows_the_manual_center_and_radius() {
+        // Off-center circle at (30, 30) r 20: (30, 55) is 25 px away → masked;
+        // (30, 45) is 15 px away → kept.
+        let mut img = RgbImage::from_pixel(100, 100, image::Rgb([200, 200, 200]));
+        apply_mask_circle(&mut img, &mask_image(30.0, 30.0, 20.0));
+        assert_eq!(img.get_pixel(30, 55).0, [0, 0, 0]);
+        assert_eq!(img.get_pixel(30, 45).0, [200, 200, 200]);
+        // circle larger than the frame → no-op
+        let mut full = RgbImage::from_pixel(100, 100, image::Rgb([200, 200, 200]));
+        apply_mask_circle(&mut full, &mask_image(50.0, 50.0, 200.0));
+        assert_eq!(full.get_pixel(0, 0).0, [200, 200, 200]);
     }
 
     #[test]

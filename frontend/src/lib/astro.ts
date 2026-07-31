@@ -1,4 +1,4 @@
-import type { LensCalibration } from '../api/types'
+import type { LensCalibration, LensType } from '../api/types'
 
 const DEG = Math.PI / 180
 
@@ -103,12 +103,79 @@ export function moonIllumination(d: Date): { pct: number; waxing: boolean } {
   }
 }
 
-/** Equidistant fisheye projection into source-image pixels. */
+/** Frame dimensions plus the camera's native sensor width, for plate scale. */
+export interface LensView {
+  frameWidth: number
+  frameHeight: number
+  /** Native sensor width in px (CameraCaps.maxWidth); == frameWidth when unknown. */
+  nativeWidth: number
+}
+
+/** Focal length in pixels at this frame's resolution. */
+export function focalLengthPx(cal: LensCalibration, view: LensView): number {
+  const binning = view.nativeWidth / view.frameWidth
+  return (cal.focalLengthMm * 1000) / (cal.pixelSizeUm * binning)
+}
+
+/** Furthest usable angle from the optical axis, per lens type. */
+export function thetaMaxDeg(lens: LensType): number {
+  return lens === 'fisheye' ? 120 : 85
+}
+
+export function opticalCenter(cal: LensCalibration, view: LensView): { x: number; y: number } {
+  return {
+    x: view.frameWidth / 2 + cal.centerOffsetXPx,
+    y: view.frameHeight / 2 + cal.centerOffsetYPx,
+  }
+}
+
+export type Vec3 = [number, number, number]
+
+const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+/** Camera basis in ENU (x=east, y=north, z=up): at pointing alt 90 / az 0 /
+ *  roll 0 the image is north-up east-right — the legacy zenith model — and
+ *  +roll rotates the sky clockwise. */
+export function camBasis(cal: LensCalibration): { fwd: Vec3; right: Vec3; up: Vec3 } {
+  const saz = Math.sin(cal.pointingAzDeg * DEG)
+  const caz = Math.cos(cal.pointingAzDeg * DEG)
+  const salt = Math.sin(cal.pointingAltDeg * DEG)
+  const calt = Math.cos(cal.pointingAltDeg * DEG)
+  const fwd: Vec3 = [calt * saz, calt * caz, salt]
+  const u0: Vec3 = [salt * saz, salt * caz, -calt]
+  const r0: Vec3 = [caz, -saz, 0]
+  const sr = Math.sin(cal.rollDeg * DEG)
+  const cr = Math.cos(cal.rollDeg * DEG)
+  const right: Vec3 = [cr * r0[0] + sr * u0[0], cr * r0[1] + sr * u0[1], cr * r0[2] + sr * u0[2]]
+  const up: Vec3 = [cr * u0[0] - sr * r0[0], cr * u0[1] - sr * r0[1], cr * u0[2] - sr * r0[2]]
+  return { fwd, right, up }
+}
+
+/** r = f·tan θ diverges at 90°; clamp so culled points still get finite pixels. */
+const RECTILINEAR_THETA_CLAMP_DEG = 89.5
+
+/** Pixel distance from the optical center at `thetaDeg` from the optical
+ *  axis — the lens's radial mapping (fisheye r = f·θ, rectilinear r = f·tan θ). */
+export function thetaToRadiusPx(cal: LensCalibration, view: LensView, thetaDeg: number): number {
+  const fPx = focalLengthPx(cal, view)
+  const theta = thetaDeg * DEG
+  return cal.lensType === 'fisheye'
+    ? fPx * theta
+    : fPx * Math.tan(Math.min(theta, RECTILINEAR_THETA_CLAMP_DEG * DEG))
+}
+
+/** Physical lens projection into source-image pixels. */
 export function altAzToImage(
-  altDeg: number, azDeg: number, cal: LensCalibration,
-): { x: number; y: number } {
-  const r = (cal.radiusPx * (90 - altDeg)) / 90
-  const theta = (azDeg + cal.rotationDeg) * DEG
+  altDeg: number, azDeg: number, cal: LensCalibration, view: LensView,
+): { x: number; y: number; thetaDeg: number } {
+  const a = altDeg * DEG
+  const z = azDeg * DEG
+  const v: Vec3 = [Math.cos(a) * Math.sin(z), Math.cos(a) * Math.cos(z), Math.sin(a)]
+  const { fwd, right, up } = camBasis(cal)
+  const theta = Math.acos(Math.min(1, Math.max(-1, dot(fwd, v))))
+  const r = thetaToRadiusPx(cal, view, theta / DEG)
+  const phi = Math.atan2(dot(v, right), dot(v, up))
   const sx = cal.flip ? -1 : 1
-  return { x: cal.cx + sx * r * Math.sin(theta), y: cal.cy - r * Math.cos(theta) }
+  const oc = opticalCenter(cal, view)
+  return { x: oc.x + sx * r * Math.sin(phi), y: oc.y - r * Math.cos(phi), thetaDeg: theta / DEG }
 }

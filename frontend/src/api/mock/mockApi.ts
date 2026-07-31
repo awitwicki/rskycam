@@ -1,7 +1,7 @@
 import type { ApiClient } from '../client'
 import type {
   ApiEvent, ArtifactState, DarkEntry, DarksLibrary, FrameInfo, FrameMeta, LightgraphData,
-  NightDetail, NightSummary, OverlayGeometry, OverlayRequest, Settings, Status, TextFieldKind,
+  LensCalibration, NightDetail, NightSummary, OverlayGeometry, OverlayRequest, Settings, Status, TextFieldKind,
 } from '../types'
 import {
   altitudeOf, moonEquatorial, moonIllumination, sunEquatorial,
@@ -25,12 +25,18 @@ export function defaultSettings(): Settings {
       manualExposureUs: 30_000_000, manualGain: 250, intervalSecDay: 120, intervalSecNight: 60,
       captureDuringDay: false, captureWidth: 1640, captureHeight: 1232,
     },
-    image: { maskMode: 'none', crop: null },
+    // Mask circle defaults match the old mock's 620 px image circle.
+    image: { maskMode: 'none', maskCenterXPx: 640, maskCenterYPx: 480, maskRadiusPx: 620, crop: null },
     location: { latitudeDeg: 50.45, longitudeDeg: 30.52 },
     sensor: { enabled: true },
     overlay: {
-      // Fisheye image circle larger than the sensor, like the real ASI120MM frame.
-      calibration: { cx: 640, cy: 480, radiusPx: 620, rotationDeg: 0, flip: false },
+      // ≈ the old 620 px image circle on the 1280×960 mock sensor:
+      // fPx = 1480/3.75 ≈ 394.7 px → horizon at fPx·π/2 ≈ 620 px.
+      calibration: {
+        lensType: 'fisheye', focalLengthMm: 1.48, pixelSizeUm: 3.75,
+        pointingAzDeg: 0, pointingAltDeg: 90, rollDeg: 0, flip: false,
+        centerOffsetXPx: 0, centerOffsetYPx: 0,
+      },
       layers: { cardinal: true, altAzGrid: true, raDecGrid: true },
       gridOpacity: 0.45,
       textFields: [
@@ -79,6 +85,9 @@ export class MockApi implements ApiClient {
         location: s.location,
         calibration: s.overlay.calibration,
         maskMode: s.image.maskMode,
+        maskCenterXPx: s.image.maskCenterXPx,
+        maskCenterYPx: s.image.maskCenterYPx,
+        maskRadiusPx: s.image.maskRadiusPx,
         crop: crop === 'settings' ? s.image.crop : null,
         scale: size / SENSOR_W,
         photo: this.sample,
@@ -92,10 +101,18 @@ export class MockApi implements ApiClient {
     const raw = localStorage.getItem(SETTINGS_KEY)
     if (!raw) return defaultSettings()
     // Merge so settings stored by older versions gain newly added sections
-    // and newly added fields inside the overlay section.
+    // and newly added fields inside the overlay and image sections.
     const stored = JSON.parse(raw) as Partial<Settings>
     const d = defaultSettings()
-    return { ...d, ...stored, overlay: { ...d.overlay, ...stored.overlay } }
+    const merged = {
+      ...d,
+      ...stored,
+      overlay: { ...d.overlay, ...stored.overlay },
+      image: { ...d.image, ...stored.image },
+    }
+    const cal = merged.overlay.calibration as Partial<LensCalibration>
+    if (typeof cal.focalLengthMm !== 'number') merged.overlay.calibration = d.overlay.calibration
+    return merged
   }
 
   // ── auth ──
@@ -240,6 +257,14 @@ export class MockApi implements ApiClient {
       gridOpacity: req.gridOpacity ?? s.overlay.gridOpacity,
       imageWidth: SENSOR_W,
       imageHeight: SENSOR_H,
+      nativeWidth: SENSOR_W,
+      mask: s.image.maskMode === 'circle'
+        ? {
+            centerXPx: s.image.maskCenterXPx,
+            centerYPx: s.image.maskCenterYPx,
+            radiusPx: s.image.maskRadiusPx,
+          }
+        : undefined,
     })
     for (const f of s.overlay.textFields) {
       geo.labels.push({

@@ -79,7 +79,27 @@ pub struct CropRect {
 #[serde(rename_all = "camelCase")]
 pub struct ImageSettings {
     pub mask_mode: MaskMode,
+    /// Manual mask circle in sensor-frame pixels — set by hand in the
+    /// editor, deliberately independent of the lens calibration.
+    #[serde(default = "default_mask_center_x_px")]
+    pub mask_center_x_px: f64,
+    #[serde(default = "default_mask_center_y_px")]
+    pub mask_center_y_px: f64,
+    #[serde(default = "default_mask_radius_px")]
+    pub mask_radius_px: f64,
     pub crop: Option<CropRect>,
+}
+
+fn default_mask_center_x_px() -> f64 {
+    640.0
+}
+
+fn default_mask_center_y_px() -> f64 {
+    480.0
+}
+
+fn default_mask_radius_px() -> f64 {
+    620.0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -95,14 +115,55 @@ pub struct SensorSettings {
     pub enabled: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LensType {
+    Fisheye,
+    Rectilinear,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LensCalibration {
-    pub cx: f64,
-    pub cy: f64,
-    pub radius_px: f64,
-    pub rotation_deg: f64,
+    // serde defaults migrate a config.toml written by the old pixel-based
+    // model (cx/cy/radiusPx are simply unknown keys and ignored).
+    #[serde(default = "default_lens_type")]
+    pub lens_type: LensType,
+    #[serde(default = "default_focal_length_mm")]
+    pub focal_length_mm: f64,
+    /// Native sensor pixel size (datasheet); binning is derived per frame.
+    #[serde(default = "default_pixel_size_um")]
+    pub pixel_size_um: f64,
+    #[serde(default)]
+    pub pointing_az_deg: f64,
+    #[serde(default = "default_pointing_alt_deg")]
+    pub pointing_alt_deg: f64,
+    /// Rotation about the optical axis; migrates the old `rotationDeg`.
+    #[serde(default, alias = "rotationDeg")]
+    pub roll_deg: f64,
+    #[serde(default)]
     pub flip: bool,
+    /// Optical center minus image center (lens mounted off-axis).
+    #[serde(default)]
+    pub center_offset_x_px: f64,
+    #[serde(default)]
+    pub center_offset_y_px: f64,
+}
+
+fn default_lens_type() -> LensType {
+    LensType::Fisheye
+}
+
+fn default_focal_length_mm() -> f64 {
+    1.8
+}
+
+fn default_pixel_size_um() -> f64 {
+    1.12
+}
+
+fn default_pointing_alt_deg() -> f64 {
+    90.0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +285,9 @@ impl Default for Settings {
             },
             image: ImageSettings {
                 mask_mode: MaskMode::None,
+                mask_center_x_px: 640.0,
+                mask_center_y_px: 480.0,
+                mask_radius_px: 620.0,
                 crop: None,
             },
             location: LocationSettings {
@@ -233,11 +297,15 @@ impl Default for Settings {
             sensor: SensorSettings { enabled: true },
             overlay: OverlaySettings {
                 calibration: LensCalibration {
-                    cx: 640.0,
-                    cy: 480.0,
-                    radius_px: 620.0,
-                    rotation_deg: 0.0,
+                    lens_type: LensType::Fisheye,
+                    focal_length_mm: 1.8, // the M12 lens on the imx219
+                    pixel_size_um: 1.12,  // imx219 native pixel
+                    pointing_az_deg: 0.0,
+                    pointing_alt_deg: 90.0,
+                    roll_deg: 0.0,
                     flip: false,
+                    center_offset_x_px: 0.0,
+                    center_offset_y_px: 0.0,
                 },
                 layers: OverlayLayers {
                     cardinal: true,
@@ -306,6 +374,18 @@ impl Settings {
         c.capture_height = c.capture_height.max(2);
 
         self.overlay.grid_opacity = self.overlay.grid_opacity.clamp(0.0, 1.0);
+        self.image.mask_center_x_px = self.image.mask_center_x_px.clamp(-10_000.0, 10_000.0);
+        self.image.mask_center_y_px = self.image.mask_center_y_px.clamp(-10_000.0, 10_000.0);
+        self.image.mask_radius_px = self.image.mask_radius_px.clamp(20.0, 10_000.0);
+
+        let cal = &mut self.overlay.calibration;
+        cal.focal_length_mm = cal.focal_length_mm.clamp(0.1, 100.0);
+        cal.pixel_size_um = cal.pixel_size_um.clamp(0.5, 50.0);
+        cal.pointing_alt_deg = cal.pointing_alt_deg.clamp(-90.0, 90.0);
+        cal.pointing_az_deg = cal.pointing_az_deg.rem_euclid(360.0);
+        cal.roll_deg = cal.roll_deg.rem_euclid(360.0);
+        cal.center_offset_x_px = cal.center_offset_x_px.clamp(-5000.0, 5000.0);
+        cal.center_offset_y_px = cal.center_offset_y_px.clamp(-5000.0, 5000.0);
 
         let p = &mut self.processing;
         p.timelapse_fps = p.timelapse_fps.clamp(1, 120);
@@ -409,10 +489,19 @@ mod tests {
         assert_eq!(s.camera.interval_sec_day, 120);
         assert_eq!(s.camera.interval_sec_night, 60);
         assert_eq!(s.image.mask_mode, MaskMode::None);
+        assert_eq!(s.image.mask_radius_px, 620.0);
+        assert_eq!(
+            (s.image.mask_center_x_px, s.image.mask_center_y_px),
+            (640.0, 480.0)
+        );
         assert!(s.image.crop.is_none());
         assert!(s.sensor.enabled);
         assert_eq!(s.overlay.grid_opacity, 0.45);
-        assert_eq!(s.overlay.calibration.radius_px, 620.0);
+        assert_eq!(s.overlay.calibration.lens_type, LensType::Fisheye);
+        assert_eq!(s.overlay.calibration.focal_length_mm, 1.8);
+        assert_eq!(s.overlay.calibration.pixel_size_um, 1.12);
+        assert_eq!(s.overlay.calibration.pointing_alt_deg, 90.0);
+        assert_eq!(s.overlay.calibration.roll_deg, 0.0);
         assert_eq!(s.overlay.text_fields.len(), 2);
         assert_eq!(s.storage.frames_retention_days, 14);
         assert_eq!(
@@ -440,11 +529,17 @@ mod tests {
         assert_eq!(v["camera"]["intervalSecDay"], 120);
         assert_eq!(v["camera"]["intervalSecNight"], 60);
         assert_eq!(v["image"]["maskMode"], "none");
+        assert_eq!(v["image"]["maskRadiusPx"], 620.0);
+        assert_eq!(v["image"]["maskCenterXPx"], 640.0);
         assert_eq!(v["image"]["crop"], serde_json::Value::Null);
         assert_eq!(v["sensor"]["enabled"], true);
         assert_eq!(v["overlay"]["gridOpacity"], 0.45);
         assert_eq!(v["overlay"]["textFields"][1]["kind"], "exposure");
-        assert_eq!(v["overlay"]["calibration"]["radiusPx"], 620.0);
+        assert_eq!(v["overlay"]["calibration"]["lensType"], "fisheye");
+        assert_eq!(v["overlay"]["calibration"]["focalLengthMm"], 1.8);
+        assert_eq!(v["overlay"]["calibration"]["pixelSizeUm"], 1.12);
+        assert_eq!(v["overlay"]["calibration"]["pointingAltDeg"], 90.0);
+        assert!(v["overlay"]["calibration"].get("radiusPx").is_none());
         assert_eq!(v["storage"]["artifactsRetentionDays"], 60);
         assert_eq!(v["processing"]["timelapseExtraArgs"], "");
         assert_eq!(v["processing"]["timelapseDay"], true);
@@ -454,6 +549,41 @@ mod tests {
         assert_eq!(v["darks"]["minExposureUsToApply"], 10_000_000);
         // settings JSON must never leak the password hash
         assert!(v.get("passwordHash").is_none());
+    }
+
+    #[test]
+    fn config_without_mask_circle_fields_loads_with_defaults() {
+        // A config.toml written before the manual mask circle existed must
+        // still load, gaining the default center/radius.
+        let dir = TempDir::new().unwrap();
+        let store = SettingsStore::new(dir.path());
+        let mut cfg = store.load_or_create("h").unwrap();
+        cfg.settings.image.mask_mode = MaskMode::Circle;
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        assert!(toml_str.contains("maskRadiusPx"));
+        let older: String = toml_str
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("maskRadiusPx")
+                    && !t.starts_with("maskCenterXPx")
+                    && !t.starts_with("maskCenterYPx")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!older.contains("maskRadiusPx"));
+        std::fs::write(dir.path().join("config.toml"), older).unwrap();
+
+        let loaded = store.load_or_create("h").unwrap();
+        assert_eq!(loaded.settings.image.mask_mode, MaskMode::Circle); // preserved
+        assert_eq!(loaded.settings.image.mask_radius_px, 620.0);
+        assert_eq!(
+            (
+                loaded.settings.image.mask_center_x_px,
+                loaded.settings.image.mask_center_y_px
+            ),
+            (640.0, 480.0)
+        );
     }
 
     #[test]
@@ -655,6 +785,8 @@ mod tests {
         s.camera.capture_width = 0;
         s.camera.capture_height = 1;
         s.overlay.grid_opacity = 5.0;
+        s.image.mask_radius_px = 5.0;
+        s.image.mask_center_x_px = 99_999.0;
         s.processing.timelapse_fps = 0;
         s.processing.startrails_brightness_limit = 900.0;
         s.storage.frames_retention_days = 0;
@@ -672,6 +804,8 @@ mod tests {
         assert!(s.camera.target_brightness >= 1.0 && s.camera.target_brightness <= 254.0);
         assert!(s.camera.capture_width >= 8 && s.camera.capture_height >= 2);
         assert!(s.overlay.grid_opacity >= 0.0 && s.overlay.grid_opacity <= 1.0);
+        assert_eq!(s.image.mask_radius_px, 20.0);
+        assert_eq!(s.image.mask_center_x_px, 10_000.0);
         assert!(s.processing.timelapse_fps >= 1);
         assert!(
             s.processing.startrails_brightness_limit >= 0.0
@@ -687,5 +821,45 @@ mod tests {
         let before = s.clone();
         s.sanitize();
         assert_eq!(s, before);
+    }
+
+    #[test]
+    fn old_pixel_calibration_migrates_with_roll_alias_and_defaults() {
+        // A config.toml calibration table written by the old model: unknown
+        // keys (cx/cy/radiusPx) are ignored, rotationDeg feeds roll_deg via
+        // its serde alias, missing physical fields get defaults.
+        let old = "cx = 640.0\ncy = 480.0\nradiusPx = 620.0\nrotationDeg = 33.0\nflip = true\n";
+        let cal: LensCalibration = toml::from_str(old).unwrap();
+        assert_eq!(cal.roll_deg, 33.0);
+        assert!(cal.flip);
+        assert_eq!(cal.lens_type, LensType::Fisheye);
+        assert_eq!(cal.focal_length_mm, 1.8);
+        assert_eq!(cal.pixel_size_um, 1.12);
+        assert_eq!(cal.pointing_alt_deg, 90.0);
+        assert_eq!(cal.pointing_az_deg, 0.0);
+        assert_eq!((cal.center_offset_x_px, cal.center_offset_y_px), (0.0, 0.0));
+    }
+
+    #[test]
+    fn sanitize_clamps_calibration_fields() {
+        let mut s = Settings::default();
+        s.overlay.calibration.focal_length_mm = 0.0;
+        s.overlay.calibration.pixel_size_um = 999.0;
+        s.overlay.calibration.pointing_alt_deg = -400.0;
+        s.overlay.calibration.pointing_az_deg = 725.0;
+        s.overlay.calibration.roll_deg = -90.0;
+        s.overlay.calibration.center_offset_x_px = 99_999.0;
+        s.overlay.calibration.center_offset_y_px = -99_999.0;
+        s.sanitize();
+        let c = &s.overlay.calibration;
+        assert_eq!(c.focal_length_mm, 0.1);
+        assert_eq!(c.pixel_size_um, 50.0);
+        assert_eq!(c.pointing_alt_deg, -90.0);
+        assert_eq!(c.pointing_az_deg, 5.0);
+        assert_eq!(c.roll_deg, 270.0);
+        assert_eq!(
+            (c.center_offset_x_px, c.center_offset_y_px),
+            (5000.0, -5000.0)
+        );
     }
 }

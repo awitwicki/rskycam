@@ -133,17 +133,26 @@ export interface CropRect {
 }
 
 export interface ImageSettings {
-  maskMode: MaskMode // 'circle' = black mask outside the lens circle
+  maskMode: MaskMode // 'circle' = black mask outside the manual circle below
+  maskCenterXPx: number // mask circle center, sensor-frame px (set by hand)
+  maskCenterYPx: number
+  maskRadiusPx: number // mask circle radius, px
   crop: CropRect | null // null = full frame; applied last in the pipeline
 }
 
-// ── overlay ────────────────────────────────────────────────────
+// ── lens calibration ──────────────────────────────────────────
+export type LensType = 'fisheye' | 'rectilinear'
+
 export interface LensCalibration {
-  cx: number // px, source-image coords
-  cy: number
-  radiusPx: number // horizon circle radius
-  rotationDeg: number // where north points in the image
+  lensType: LensType // fisheye: r = f·θ; rectilinear: r = f·tan θ
+  focalLengthMm: number
+  pixelSizeUm: number // native sensor pixel size (datasheet); binning derived
+  pointingAzDeg: number // azimuth of the optical axis, 0–360
+  pointingAltDeg: number // altitude of the optical axis; 90 = zenith
+  rollDeg: number // rotation about the optical axis (was rotationDeg)
   flip: boolean // mirror east/west
+  centerOffsetXPx: number // optical center minus image center
+  centerOffsetYPx: number
 }
 
 export interface OverlayLayers {

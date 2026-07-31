@@ -1,55 +1,161 @@
 import { describe, expect, it } from 'vitest'
+import type { ImageSettings } from '../api/types'
+import { altAzToImage } from './astro'
 import {
-  applyCropDrag, applyDrag, cropHitTest, handlePositions, hitTest, textFieldHitTest,
+  applyCenterPan, applyCropDrag, applyMaskDrag, applyRollDrag, applySkyPan,
+  applyWheelZoom, calibrationHitTest, cropHitTest, imageToAltAz,
+  maskHandlePositions, maskHitTest, rollHandlePosition, textFieldHitTest,
 } from './editorMath'
 
-const cal = { cx: 480, cy: 480, radiusPx: 440, rotationDeg: 0, flip: false }
+const cal = {
+  lensType: 'fisheye' as const,
+  focalLengthMm: 0.88 / Math.PI,
+  pixelSizeUm: 1,
+  pointingAzDeg: 0,
+  pointingAltDeg: 90,
+  rollDeg: 0,
+  flip: false,
+  centerOffsetXPx: 0,
+  centerOffsetYPx: 0,
+}
+const view = { frameWidth: 960, frameHeight: 960, nativeWidth: 960 }
 
-describe('handlePositions', () => {
-  it('rotation handle sits at north, radius handle at east (rotation 0)', () => {
-    const hp = handlePositions(cal)
-    expect(hp.center).toEqual({ x: 480, y: 480 })
-    expect(hp.rotation.x).toBeCloseTo(480)
-    expect(hp.rotation.y).toBeCloseTo(40)
-    expect(hp.radius.x).toBeCloseTo(920)
-    expect(hp.radius.y).toBeCloseTo(480)
+describe('imageToAltAz', () => {
+  it('is the inverse of altAzToImage', () => {
+    for (const [alt, az] of [[50, 120], [10, 300], [80, 45]] as const) {
+      const p = altAzToImage(alt, az, cal, view)
+      const r = imageToAltAz(p.x, p.y, cal, view)
+      expect(r.altDeg).toBeCloseTo(alt, 6)
+      expect(r.azDeg).toBeCloseTo(az, 6)
+    }
   })
 
-  it('flip mirrors the radius handle to the west side', () => {
-    const hp = handlePositions({ ...cal, flip: true })
-    expect(hp.radius.x).toBeCloseTo(40)
+  it('round-trips for tilted and rectilinear calibrations', () => {
+    const tilted = { ...cal, pointingAzDeg: 180, pointingAltDeg: 40, rollDeg: 30 }
+    const p = altAzToImage(55, 200, tilted, view)
+    const r = imageToAltAz(p.x, p.y, tilted, view)
+    expect(r.altDeg).toBeCloseTo(55, 6)
+    expect(r.azDeg).toBeCloseTo(200, 6)
+    const rect = { ...cal, lensType: 'rectilinear' as const }
+    const q = altAzToImage(60, 10, rect, view)
+    const s = imageToAltAz(q.x, q.y, rect, view)
+    expect(s.altDeg).toBeCloseTo(60, 6)
+    expect(s.azDeg).toBeCloseTo(10, 6)
+  })
+
+  it('maps the legacy horizon-north pixel back to alt 0 az 0', () => {
+    const r = imageToAltAz(480, 40, cal, view)
+    expect(r.altDeg).toBeCloseTo(0, 6)
+    expect(r.azDeg).toBeCloseTo(0, 6)
   })
 })
 
-describe('hitTest', () => {
-  it('finds each handle within tolerance, null elsewhere', () => {
-    expect(hitTest(482, 478, cal)).toBe('center')
-    expect(hitTest(480, 45, cal)).toBe('rotation')
-    expect(hitTest(915, 480, cal)).toBe('radius')
-    expect(hitTest(200, 200, cal)).toBeNull()
+describe('applySkyPan', () => {
+  it('same point → calibration unchanged', () => {
+    const p = altAzToImage(45, 30, cal, view)
+    const grab = imageToAltAz(p.x, p.y, cal, view)
+    const next = applySkyPan(grab, p.x, p.y, cal, view)
+    expect(next.pointingAzDeg).toBeCloseTo(0, 6)
+    expect(next.pointingAltDeg).toBeCloseTo(90, 6)
+  })
+
+  it('dragging a grabbed point onto another sky position shifts pointing by the delta', () => {
+    // Grab the sky at (alt 45, az 0), drop the cursor on the pixel where
+    // (alt 45, az 10) currently sits → pointing azimuth moves −10° (wraps).
+    const grab = { altDeg: 45, azDeg: 0 }
+    const target = altAzToImage(45, 10, cal, view)
+    const next = applySkyPan(grab, target.x, target.y, cal, view)
+    expect(next.pointingAzDeg).toBeCloseTo(350, 5)
+    expect(next.pointingAltDeg).toBeCloseTo(90, 5)
+  })
+
+  it('clamps pointing altitude to ±90', () => {
+    const c = { ...cal, pointingAltDeg: 89 }
+    const grab = { altDeg: 40, azDeg: 180 }
+    const target = altAzToImage(30, 180, c, view) // drag the sky 10° "down"
+    const next = applySkyPan(grab, target.x, target.y, c, view)
+    expect(next.pointingAltDeg).toBeLessThanOrEqual(90)
   })
 })
 
-describe('applyDrag', () => {
-  it('center drag moves cx/cy', () => {
-    const next = applyDrag('center', 400, 500, cal)
-    expect(next.cx).toBe(400)
-    expect(next.cy).toBe(500)
+describe('roll handle', () => {
+  it('sits at 0.35·min(W,H) above the optical center at roll 0', () => {
+    const h = rollHandlePosition(cal, view)
+    expect(h.x).toBeCloseTo(480)
+    expect(h.y).toBeCloseTo(480 - 0.35 * 960)
   })
 
-  it('radius drag sets radius to pointer distance from center', () => {
-    const next = applyDrag('radius', 480 + 300, 480, cal)
-    expect(next.radiusPx).toBeCloseTo(300)
+  it('hit-tests the handle and misses elsewhere', () => {
+    expect(calibrationHitTest(480, 480 - 336, cal, view)).toBe('roll')
+    expect(calibrationHitTest(480, 480, cal, view)).toBeNull()
   })
 
-  it('rotation drag: pointer due east sets rotation to 90°', () => {
-    const next = applyDrag('rotation', 900, 480, cal)
-    expect(next.rotationDeg).toBeCloseTo(90)
+  it('drag due east sets roll 90; flip mirrors to 270', () => {
+    expect(applyRollDrag(900, 480, cal, view).rollDeg).toBeCloseTo(90)
+    expect(applyRollDrag(900, 480, { ...cal, flip: true }, view).rollDeg).toBeCloseTo(270)
+  })
+})
+
+describe('applyWheelZoom', () => {
+  it('scroll down shrinks focal length, scroll up grows it, both clamped', () => {
+    expect(applyWheelZoom(cal, 100).focalLengthMm).toBeLessThan(cal.focalLengthMm)
+    expect(applyWheelZoom(cal, -100).focalLengthMm).toBeGreaterThan(cal.focalLengthMm)
+    expect(applyWheelZoom({ ...cal, focalLengthMm: 0.1 }, 10_000).focalLengthMm).toBe(0.1)
+    expect(applyWheelZoom({ ...cal, focalLengthMm: 100 }, -10_000).focalLengthMm).toBe(100)
+  })
+})
+
+describe('applyCenterPan', () => {
+  it('moves the optical-center offsets by the pointer delta from the grab point', () => {
+    const grab = { offsetX: 10, offsetY: -20, x: 500, y: 400 }
+    const next = applyCenterPan(grab, 530, 380, cal)
+    expect(next.centerOffsetXPx).toBe(40)
+    expect(next.centerOffsetYPx).toBe(-40)
   })
 
-  it('rotation drag respects flip', () => {
-    const next = applyDrag('rotation', 900, 480, { ...cal, flip: true })
-    expect(next.rotationDeg).toBeCloseTo(270)
+  it('same point → offsets unchanged', () => {
+    const grab = { offsetX: 7, offsetY: 9, x: 100, y: 100 }
+    const next = applyCenterPan(grab, 100, 100, cal)
+    expect(next.centerOffsetXPx).toBe(7)
+    expect(next.centerOffsetYPx).toBe(9)
+  })
+
+  it('clamps offsets to the sanitize bounds (±5000)', () => {
+    const grab = { offsetX: 4990, offsetY: -4990, x: 0, y: 0 }
+    const next = applyCenterPan(grab, 100, -100, cal)
+    expect(next.centerOffsetXPx).toBe(5000)
+    expect(next.centerOffsetYPx).toBe(-5000)
+  })
+})
+
+describe('mask circle handles', () => {
+  const img: ImageSettings = {
+    maskMode: 'circle', maskCenterXPx: 640, maskCenterYPx: 480, maskRadiusPx: 620, crop: null,
+  }
+
+  it('positions: center dot and a radius dot on the east edge', () => {
+    const hp = maskHandlePositions(img)
+    expect(hp.maskCenter).toEqual({ x: 640, y: 480 })
+    expect(hp.maskRadius).toEqual({ x: 1260, y: 480 })
+  })
+
+  it('hit-tests both handles, misses elsewhere', () => {
+    expect(maskHitTest(642, 478, img)).toBe('maskCenter')
+    expect(maskHitTest(1255, 482, img)).toBe('maskRadius')
+    expect(maskHitTest(900, 100, img)).toBeNull()
+  })
+
+  it('center drag moves the circle', () => {
+    const next = applyMaskDrag('maskCenter', 500, 400, img)
+    expect(next.maskCenterXPx).toBe(500)
+    expect(next.maskCenterYPx).toBe(400)
+    expect(next.maskRadiusPx).toBe(620)
+  })
+
+  it('radius drag sets radius to pointer distance, min 20', () => {
+    const next = applyMaskDrag('maskRadius', 640 + 300, 480, img)
+    expect(next.maskRadiusPx).toBeCloseTo(300)
+    expect(applyMaskDrag('maskRadius', 641, 480, img).maskRadiusPx).toBe(20)
   })
 })
 

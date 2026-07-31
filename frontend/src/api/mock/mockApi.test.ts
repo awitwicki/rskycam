@@ -82,7 +82,11 @@ describe('MockApi settings & overlay', () => {
   it('overlay honors calibration override and appends text-field labels', async () => {
     const api = stub()
     const g = await api.getOverlay({
-      calibration: { cx: 100, cy: 100, radiusPx: 90, rotationDeg: 0, flip: false },
+      calibration: {
+        lensType: 'fisheye', focalLengthMm: 2, pixelSizeUm: 3.75,
+        pointingAzDeg: 0, pointingAltDeg: 90, rollDeg: 0, flip: false,
+        centerOffsetXPx: 0, centerOffsetYPx: 0,
+      },
     })
     expect(g.polylines.length).toBeGreaterThan(0)
     const textLabels = g.labels.filter((l) => l.layer === 'text')
@@ -105,22 +109,44 @@ describe('MockApi settings & overlay', () => {
     expect(Math.min(...lg.sunAltDeg)).toBeLessThan(-10)
   })
 
-  it('fills newly added settings sections when older settings are stored', async () => {
+  it('fills newly added settings sections and discards a pre-physical calibration', async () => {
     localStorage.setItem(
       'rskycam.mock.settings',
       JSON.stringify({
         location: { latitudeDeg: 1, longitudeDeg: 2 },
-        // an overlay section from before gridOpacity existed
+        // an overlay section stored by the old pixel-based model
         overlay: { calibration: { cx: 11, cy: 22, radiusPx: 33, rotationDeg: 0, flip: false } },
+        // an image section from before the manual mask circle existed
+        image: { maskMode: 'circle', crop: null },
       }),
     )
     const s = await stub().getSettings()
-    expect(s.image.maskMode).toBeDefined()
-    expect(s.camera.driver).toBe('mock')
     expect(s.location.latitudeDeg).toBe(1)
-    expect(s.overlay.calibration.cx).toBe(11) // stored values win
+    // old-shape calibration is unusable → replaced by the default
+    expect(s.overlay.calibration.focalLengthMm).toBe(1.48)
     expect(s.overlay.gridOpacity).toBe(0.45) // new overlay field gains its default
     expect(s.overlay.layers.cardinal).toBe(true)
+    expect(s.image.maskMode).toBe('circle') // stored value wins
+    expect(s.image.maskRadiusPx).toBe(620) // new image fields gain their defaults
+    expect(s.image.maskCenterXPx).toBe(640)
+  })
+
+  it('keeps a stored new-shape calibration', async () => {
+    localStorage.setItem(
+      'rskycam.mock.settings',
+      JSON.stringify({
+        overlay: {
+          calibration: {
+            lensType: 'fisheye', focalLengthMm: 2.5, pixelSizeUm: 3.75,
+            pointingAzDeg: 10, pointingAltDeg: 80, rollDeg: 5, flip: false,
+            centerOffsetXPx: 0, centerOffsetYPx: 0,
+          },
+        },
+      }),
+    )
+    const s = await stub().getSettings()
+    expect(s.overlay.calibration.focalLengthMm).toBe(2.5)
+    expect(s.overlay.calibration.pointingAltDeg).toBe(80)
   })
 
   it('grid polylines carry the settings gridOpacity; request override wins', async () => {

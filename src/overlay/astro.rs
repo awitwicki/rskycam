@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use crate::settings::LensCalibration;
+use crate::settings::{LensCalibration, LensType};
 
 const DEG: f64 = std::f64::consts::PI / 180.0;
 
@@ -109,19 +109,107 @@ pub fn moon_illumination(t: DateTime<Utc>) -> MoonIllumination {
     }
 }
 
-pub struct Point {
-    pub x: f64,
-    pub y: f64,
+/// Frame dimensions plus the camera's native sensor width, for plate scale.
+#[derive(Clone, Copy, Debug)]
+pub struct LensView {
+    pub frame_width: u32,
+    pub frame_height: u32,
+    /// Native sensor width in px (`CameraInfo::max_width`); equal to
+    /// `frame_width` when unknown (binning 1).
+    pub native_width: u32,
 }
 
-/// Equidistant fisheye projection into source-image pixels.
-pub fn alt_az_to_image(alt_deg: f64, az_deg: f64, cal: &LensCalibration) -> Point {
-    let r = cal.radius_px * (90.0 - alt_deg) / 90.0;
-    let theta = (az_deg + cal.rotation_deg) * DEG;
+/// Focal length in pixels at this frame's resolution.
+pub fn focal_length_px(cal: &LensCalibration, view: &LensView) -> f64 {
+    let binning = view.native_width as f64 / view.frame_width as f64;
+    cal.focal_length_mm * 1000.0 / (cal.pixel_size_um * binning)
+}
+
+/// Furthest usable angle from the optical axis, per lens type. Fisheye keeps
+/// the legacy cardinal labels at alt −8° (θ ≈ 98° when zenith-pointed);
+/// rectilinear stops short of the 90° tan singularity.
+pub fn theta_max_deg(lens: LensType) -> f64 {
+    match lens {
+        LensType::Fisheye => 120.0,
+        LensType::Rectilinear => 85.0,
+    }
+}
+
+pub fn optical_center(cal: &LensCalibration, view: &LensView) -> (f64, f64) {
+    (
+        view.frame_width as f64 / 2.0 + cal.center_offset_x_px,
+        view.frame_height as f64 / 2.0 + cal.center_offset_y_px,
+    )
+}
+
+pub struct Projected {
+    pub x: f64,
+    pub y: f64,
+    /// Angle from the optical axis, for field-of-view culling.
+    pub theta_deg: f64,
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Camera basis in ENU (x=east, y=north, z=up), built so that at pointing
+/// alt 90 / az 0 / roll 0 the image is north-up east-right — exactly the
+/// legacy zenith model — and +roll rotates the sky clockwise.
+fn cam_basis(cal: &LensCalibration) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let (saz, caz) = (cal.pointing_az_deg * DEG).sin_cos();
+    let (salt, calt) = (cal.pointing_alt_deg * DEG).sin_cos();
+    let fwd = [calt * saz, calt * caz, salt];
+    let u0 = [salt * saz, salt * caz, -calt];
+    let r0 = [caz, -saz, 0.0];
+    let (sr, cr) = (cal.roll_deg * DEG).sin_cos();
+    let right = [
+        cr * r0[0] + sr * u0[0],
+        cr * r0[1] + sr * u0[1],
+        cr * r0[2] + sr * u0[2],
+    ];
+    let up = [
+        cr * u0[0] - sr * r0[0],
+        cr * u0[1] - sr * r0[1],
+        cr * u0[2] - sr * r0[2],
+    ];
+    (fwd, right, up)
+}
+
+/// r = f·tan θ diverges at 90°; clamp so culled points still get finite pixels.
+const RECTILINEAR_THETA_CLAMP_DEG: f64 = 89.5;
+
+/// Pixel distance from the optical center at `theta_deg` from the optical
+/// axis — the lens's radial mapping (fisheye r = f·θ, rectilinear r = f·tan θ).
+pub fn theta_to_radius_px(cal: &LensCalibration, view: &LensView, theta_deg: f64) -> f64 {
+    let f_px = focal_length_px(cal, view);
+    let theta = theta_deg * DEG;
+    match cal.lens_type {
+        LensType::Fisheye => f_px * theta,
+        LensType::Rectilinear => f_px * theta.min(RECTILINEAR_THETA_CLAMP_DEG * DEG).tan(),
+    }
+}
+
+/// Physical lens projection into source-image pixels.
+pub fn alt_az_to_image(
+    alt_deg: f64,
+    az_deg: f64,
+    cal: &LensCalibration,
+    view: &LensView,
+) -> Projected {
+    let (sa, ca) = (alt_deg * DEG).sin_cos();
+    let (saz, caz) = (az_deg * DEG).sin_cos();
+    let v = [ca * saz, ca * caz, sa];
+    let (fwd, right, up) = cam_basis(cal);
+    let theta = dot(fwd, v).clamp(-1.0, 1.0).acos();
+    let r = theta_to_radius_px(cal, view, theta / DEG);
+    let phi = dot(v, right).atan2(dot(v, up));
     let sx = if cal.flip { -1.0 } else { 1.0 };
-    Point {
-        x: cal.cx + sx * r * theta.sin(),
-        y: cal.cy - r * theta.cos(),
+    let (ocx, ocy) = optical_center(cal, view);
+    Projected {
+        x: ocx + sx * r * phi.sin(),
+        y: ocy - r * phi.cos(),
+        theta_deg: theta / DEG,
     }
 }
 
@@ -139,11 +227,23 @@ mod tests {
 
     fn cal() -> crate::settings::LensCalibration {
         crate::settings::LensCalibration {
-            cx: 480.0,
-            cy: 480.0,
-            radius_px: 440.0,
-            rotation_deg: 0.0,
+            lens_type: crate::settings::LensType::Fisheye,
+            focal_length_mm: 0.88 / std::f64::consts::PI, // fPx = 880/π → horizon at 440 px
+            pixel_size_um: 1.0,
+            pointing_az_deg: 0.0,
+            pointing_alt_deg: 90.0,
+            roll_deg: 0.0,
             flip: false,
+            center_offset_x_px: 0.0,
+            center_offset_y_px: 0.0,
+        }
+    }
+
+    fn view() -> super::LensView {
+        super::LensView {
+            frame_width: 960,
+            frame_height: 960,
+            native_width: 960,
         }
     }
 
@@ -171,24 +271,80 @@ mod tests {
 
     #[test]
     fn zenith_projects_to_center_horizon_n_up_e_right() {
-        let z = alt_az_to_image(90.0, 123.0, &cal());
+        // Legacy zenith vectors: the physical model must reduce exactly to
+        // the old radiusPx model (radiusPx = fPx·π/2 = 440).
+        let z = alt_az_to_image(90.0, 123.0, &cal(), &view());
         assert!((z.x - 480.0).abs() < 1e-6 && (z.y - 480.0).abs() < 1e-6);
-        let n = alt_az_to_image(0.0, 0.0, &cal());
+        let n = alt_az_to_image(0.0, 0.0, &cal(), &view());
         assert!((n.x - 480.0).abs() < 1e-6 && (n.y - 40.0).abs() < 1e-6);
-        let e = alt_az_to_image(0.0, 90.0, &cal());
+        assert!((n.theta_deg - 90.0).abs() < 1e-6);
+        let e = alt_az_to_image(0.0, 90.0, &cal(), &view());
         assert!((e.x - 920.0).abs() < 1e-6 && (e.y - 480.0).abs() < 1e-6);
     }
 
     #[test]
-    fn rotation_and_flip_behave_like_the_ts_reference() {
+    fn roll_and_flip_behave_like_the_ts_reference() {
         let mut c = cal();
-        c.rotation_deg = 90.0;
-        let n = alt_az_to_image(0.0, 0.0, &c);
+        c.roll_deg = 90.0;
+        let n = alt_az_to_image(0.0, 0.0, &c, &view());
         assert!((n.x - 920.0).abs() < 1e-6 && (n.y - 480.0).abs() < 1e-6);
         let mut f = cal();
         f.flip = true;
-        let e = alt_az_to_image(0.0, 90.0, &f);
+        let e = alt_az_to_image(0.0, 90.0, &f, &view());
         assert!((e.x - 40.0).abs() < 1e-6 && (e.y - 480.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tilted_pointing_puts_the_pointing_on_center_and_zenith_below() {
+        // Camera tilted toward the south horizon at alt 45: the pointing
+        // direction hits the optical center; the zenith (θ = 45°) lands
+        // fPx·π/4 = 220 px straight below it (ρ = 0 convention).
+        let mut c = cal();
+        c.pointing_az_deg = 180.0;
+        c.pointing_alt_deg = 45.0;
+        let p = alt_az_to_image(45.0, 180.0, &c, &view());
+        assert!((p.x - 480.0).abs() < 1e-6 && (p.y - 480.0).abs() < 1e-6);
+        assert!(p.theta_deg < 1e-6);
+        let z = alt_az_to_image(90.0, 0.0, &c, &view());
+        assert!((z.x - 480.0).abs() < 1e-6 && (z.y - 700.0).abs() < 1e-6);
+        assert!((z.theta_deg - 45.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rectilinear_projects_tan_theta() {
+        let mut c = cal();
+        c.lens_type = crate::settings::LensType::Rectilinear;
+        // θ = 45° → r = fPx·tan 45 = fPx = 880/π
+        let p = alt_az_to_image(45.0, 0.0, &c, &view());
+        assert!((p.x - 480.0).abs() < 1e-6);
+        assert!((p.y - (480.0 - 880.0 / std::f64::consts::PI)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn binning_halves_the_plate_scale() {
+        // Same lens on a 2×-binned frame: native 960, frame 480 → fPx halves.
+        let v = super::LensView {
+            frame_width: 480,
+            frame_height: 480,
+            native_width: 960,
+        };
+        let n = alt_az_to_image(0.0, 0.0, &cal(), &v);
+        assert!((n.x - 240.0).abs() < 1e-6 && (n.y - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn theta_to_radius_matches_the_lens_mapping() {
+        // Fisheye: r = fPx·θ → 440 px at the 90° horizon, 220 px at 45°.
+        let r90 = super::theta_to_radius_px(&cal(), &view(), 90.0);
+        assert!((r90 - 440.0).abs() < 1e-6);
+        let r45 = super::theta_to_radius_px(&cal(), &view(), 45.0);
+        assert!((r45 - 220.0).abs() < 1e-6);
+        // Rectilinear: r = fPx·tan θ → fPx at 45°; θ ≥ 90° stays finite (clamped).
+        let mut c = cal();
+        c.lens_type = crate::settings::LensType::Rectilinear;
+        let t45 = super::theta_to_radius_px(&c, &view(), 45.0);
+        assert!((t45 - 880.0 / std::f64::consts::PI).abs() < 1e-6);
+        assert!(super::theta_to_radius_px(&c, &view(), 90.0).is_finite());
     }
 
     #[test]

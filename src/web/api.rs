@@ -247,6 +247,12 @@ pub async fn post_overlay(
         .unwrap_or_else(Utc::now);
     let calibration = req.calibration.unwrap_or(s.overlay.calibration);
     let layers = req.layers.unwrap_or(s.overlay.layers);
+    let native_width = state
+        .camera_caps
+        .borrow()
+        .as_ref()
+        .map(|c| c.max_width)
+        .unwrap_or(w);
     let mut geo = geometry::build_overlay_geometry(&geometry::BuildOptions {
         time,
         location: &s.location,
@@ -255,6 +261,8 @@ pub async fn post_overlay(
         grid_opacity: Some(req.grid_opacity.unwrap_or(s.overlay.grid_opacity)),
         image_width: w,
         image_height: h,
+        native_width,
+        mask: geometry::MaskCircle::from_image(&s.image),
     });
     let sensor = crate::sensors::read_sensor(s.sensor.enabled);
     let ctx = geometry::TextContext {
@@ -472,6 +480,7 @@ mod tests {
             crate::settings::CameraDriver::Mock,
             true,
             None,
+            1280,
         )
         .unwrap();
         h.latest_tx.send(Some(std::sync::Arc::new(latest))).unwrap();
@@ -543,6 +552,47 @@ mod tests {
         .await;
         assert_eq!(rect["imageWidth"], 700);
         assert_eq!(rect["imageHeight"], 800);
+
+        // calibration override: the altAz horizon ring (polylines[0], per
+        // alt_az_grid_has_3_circles_and_8_radials in overlay/geometry.rs) sits
+        // at a radius from the frame center that scales with focalLengthMm.
+        let max_radius_from_center = |geo: &serde_json::Value| -> f64 {
+            let cx = geo["imageWidth"].as_f64().unwrap() / 2.0;
+            let cy = geo["imageHeight"].as_f64().unwrap() / 2.0;
+            geo["polylines"][0]["points"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    let x = p[0].as_f64().unwrap();
+                    let y = p[1].as_f64().unwrap();
+                    ((x - cx).powi(2) + (y - cy).powi(2)).sqrt()
+                })
+                .fold(0.0_f64, f64::max)
+        };
+        let narrow = post(serde_json::json!({
+            "calibration": {
+                "lensType": "fisheye", "focalLengthMm": 1.0, "pixelSizeUm": 3.75,
+                "pointingAzDeg": 0.0, "pointingAltDeg": 90.0, "rollDeg": 0.0, "flip": false,
+                "centerOffsetXPx": 0.0, "centerOffsetYPx": 0.0
+            },
+            "crop": null
+        }))
+        .await;
+        let wide = post(serde_json::json!({
+            "calibration": {
+                "lensType": "fisheye", "focalLengthMm": 2.0, "pixelSizeUm": 3.75,
+                "pointingAzDeg": 0.0, "pointingAltDeg": 90.0, "rollDeg": 0.0, "flip": false,
+                "centerOffsetXPx": 0.0, "centerOffsetYPx": 0.0
+            },
+            "crop": null
+        }))
+        .await;
+        assert_ne!(
+            max_radius_from_center(&narrow),
+            max_radius_from_center(&wide),
+            "geometry must respond to a calibration override in the request body"
+        );
     }
 
     #[tokio::test]
@@ -596,6 +646,7 @@ mod tests {
             crate::settings::CameraDriver::Mock,
             true,
             None,
+            1280,
         )
         .unwrap();
         h.latest_tx.send(Some(std::sync::Arc::new(latest))).unwrap();
@@ -745,6 +796,7 @@ mod tests {
             crate::settings::CameraDriver::Mock,
             true,
             None,
+            1280,
         )
         .unwrap();
         assert_eq!((latest.raw_width, latest.raw_height), (1280, 960));

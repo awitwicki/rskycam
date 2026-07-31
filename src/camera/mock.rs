@@ -3,10 +3,28 @@ use image::{Rgb, RgbImage};
 
 use crate::camera::{Camera, CameraError, CameraInfo, CaptureParams, Frame};
 use crate::overlay::astro;
+use crate::settings::{LensCalibration, LensType};
 
 const W: u32 = 1280;
 const H: u32 = 960;
 const STAR_COUNT: u64 = 350;
+
+/// Calibration for the synthetic sky, independent of `Settings::default()`
+/// (which holds the imx219 *physical* lens values). Mirrors the frontend
+/// mock's calibration in `frontend/src/api/mock/mockApi.ts` (`defaultSettings`):
+/// the old ~620 px image circle on this 1280×960 mock frame
+/// (fPx = 1480/3.75 ≈ 394.7 px → horizon at fPx·π/2 ≈ 620 px).
+const MOCK_CALIBRATION: LensCalibration = LensCalibration {
+    lens_type: LensType::Fisheye,
+    focal_length_mm: 1.48,
+    pixel_size_um: 3.75,
+    pointing_az_deg: 0.0,
+    pointing_alt_deg: 90.0,
+    roll_deg: 0.0,
+    flip: false,
+    center_offset_x_px: 0.0,
+    center_offset_y_px: 0.0,
+};
 
 /// The sky is never pure black (light pollution / airglow); this floor also
 /// guarantees the exposure response is measurable at astronomical night.
@@ -59,7 +77,12 @@ impl Camera for MockCamera {
     fn capture(&mut self, p: CaptureParams) -> Result<Frame, CameraError> {
         let now = Utc::now();
         let defaults = crate::settings::Settings::default();
-        let cal = defaults.overlay.calibration;
+        let cal = MOCK_CALIBRATION;
+        let view = astro::LensView {
+            frame_width: W,
+            frame_height: H,
+            native_width: W,
+        };
         let (lat, lon) = (
             defaults.location.latitude_deg,
             defaults.location.longitude_deg,
@@ -82,7 +105,7 @@ impl Camera for MockCamera {
             if aa.alt_deg < 0.0 {
                 continue;
             }
-            let pt = astro::alt_az_to_image(aa.alt_deg, aa.az_deg, &cal);
+            let pt = astro::alt_az_to_image(aa.alt_deg, aa.az_deg, &cal, &view);
             let (x, y) = (pt.x.round() as i64, pt.y.round() as i64);
             if !(0..W as i64).contains(&x) || !(0..H as i64).contains(&y) {
                 continue;

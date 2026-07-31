@@ -20,6 +20,12 @@ use crate::settings::{CameraDriver, ConfigFile, MaskMode, Settings};
 
 pub const NIGHT_SUN_ALT_DEG: f64 = -6.0;
 
+/// A built camera, tagged with the (driver, configured width, configured
+/// height, native sensor width) it was built for — so a settings change to
+/// any of the first three forces a rebuild, and the native width rides along
+/// for mask/overlay geometry without re-probing the camera.
+type CameraSlot = (CameraDriver, u32, u32, u32, Box<dyn Camera>);
+
 /// Delay between metering frames while auto-exposure is still converging —
 /// short so the exposure settles in seconds rather than one capture interval
 /// per step.
@@ -121,6 +127,7 @@ pub fn process_frame(
     driver: CameraDriver,
     is_night: bool,
     sensor_temp_c: Option<f64>,
+    native_width: u32,
 ) -> Result<(LatestFrame, RgbImage), CameraError> {
     let mut img = frame.image.clone();
     let (iw, ih) = img.dimensions();
@@ -135,7 +142,7 @@ pub fn process_frame(
         frame.gain,
     );
     if s.image.mask_mode == MaskMode::Circle {
-        apply_mask_circle(&mut img, &s.overlay.calibration);
+        apply_mask_circle(&mut img, &s.image);
     }
     let raw_jpeg = Bytes::from(encode_jpeg(&img)?);
     let (rw, rh) = (img.width(), img.height());
@@ -157,6 +164,8 @@ pub fn process_frame(
             grid_opacity: Some(s.overlay.grid_opacity),
             image_width: rw,
             image_height: rh,
+            native_width,
+            mask: geometry::MaskCircle::from_image(&s.image),
         });
         let ctx = geometry::TextContext {
             local_time: frame
@@ -296,8 +305,11 @@ where
     tokio::spawn(async move {
         let mut params: Option<CaptureParams> = None;
         // The camera is tagged with the (driver, width, height) it was built
-        // for, so a settings change to any of them forces a rebuild.
-        let mut camera: Option<(CameraDriver, u32, u32, Box<dyn Camera>)> = None;
+        // for, so a settings change to any of them forces a rebuild. The
+        // native sensor width (from the camera's own reported caps) rides
+        // along so the mask/overlay geometry can be computed without
+        // re-probing the camera.
+        let mut camera: Option<CameraSlot> = None;
         let mut backoff = Duration::from_secs(1);
 
         loop {
@@ -309,7 +321,7 @@ where
             );
 
             // (Re)create the camera when missing or when driver/resolution changed.
-            if camera.as_ref().map(|(d, w, h, _)| (*d, *w, *h)) != Some(want) {
+            if camera.as_ref().map(|(d, w, h, _, _)| (*d, *w, *h)) != Some(want) {
                 camera = None;
             }
             if camera.is_none() {
@@ -320,8 +332,9 @@ where
                 match built {
                     Ok(result) => match result {
                         Ok(c) => {
-                            let _ = caps_tx.send(Some(CameraCaps::from(&c.info())));
-                            camera = Some((driver, width, height, c));
+                            let info = c.info();
+                            let _ = caps_tx.send(Some(CameraCaps::from(&info)));
+                            camera = Some((driver, width, height, info.max_width, c));
                             backoff = Duration::from_secs(1);
                         }
                         Err(e) => {
@@ -378,7 +391,7 @@ where
                 continue;
             }
 
-            let (_, _, _, cam) = camera.as_ref().expect("camera present");
+            let (_, _, _, _, cam) = camera.as_ref().expect("camera present");
             let info = cam.info();
             let lim = auto_exposure::ExposureLimits {
                 min_exposure_us: s.camera.exposure_us_min.max(info.min_exposure_us),
@@ -387,12 +400,15 @@ where
                 max_gain: s.camera.gain_max.min(info.max_gain),
             };
             let p = if s.camera.auto_exposure {
-                params.unwrap_or(CaptureParams {
-                    exposure_us: s
-                        .camera
-                        .manual_exposure_us
-                        .clamp(lim.min_exposure_us, lim.max_exposure_us),
-                    gain: s.camera.manual_gain.clamp(lim.min_gain, lim.max_gain),
+                params.unwrap_or_else(|| {
+                    auto_exposure::initial_params(
+                        night,
+                        CaptureParams {
+                            exposure_us: s.camera.manual_exposure_us,
+                            gain: s.camera.manual_gain,
+                        },
+                        &lim,
+                    )
                 })
             } else {
                 CaptureParams {
@@ -412,7 +428,7 @@ where
             // nothing left to reassemble. A panic anywhere in here (e.g. a
             // misbehaving driver) surfaces as a `JoinError` below instead of
             // taking down the supervisor task.
-            let (driver, cam_w, cam_h, mut cam) = camera.take().expect("camera present");
+            let (driver, cam_w, cam_h, native_w, mut cam) = camera.take().expect("camera present");
             let join = tokio::task::spawn_blocking({
                 let s = s.clone();
                 let data_dir = data_dir.clone();
@@ -435,7 +451,7 @@ where
                             .flatten()
                             .map(|r| r.temperature_c);
                         let (latest, clean) =
-                            process_frame(&frame, &s, &data_dir, driver, night, temp)?;
+                            process_frame(&frame, &s, &data_dir, driver, night, temp, native_w)?;
                         // Don't save frames auto-exposure is still hunting
                         // through: only "clipped" (near-black/near-white mean)
                         // used to be filtered, but a frame can be well off
@@ -506,7 +522,7 @@ where
                     continue;
                 }
             };
-            camera = Some((driver, cam_w, cam_h, cam));
+            camera = Some((driver, cam_w, cam_h, native_w, cam));
 
             let (latest, mean, taken) = match result {
                 Ok(v) => v,
@@ -591,12 +607,12 @@ where
 /// leaves `camera` as `None`, same as a normal capture panic — the
 /// supervisor re-probes a fresh camera on its next loop iteration.
 async fn run_darks_sweep(
-    camera: &mut Option<(CameraDriver, u32, u32, Box<dyn Camera>)>,
+    camera: &mut Option<CameraSlot>,
     s: &Settings,
     data_dir: &Path,
     progress_tx: &watch::Sender<Option<crate::darks::DarksProgress>>,
 ) {
-    let Some((driver, w, h, mut cam)) = camera.take() else {
+    let Some((driver, w, h, native_w, mut cam)) = camera.take() else {
         tracing::warn!("darks sweep requested but no camera is currently available");
         return;
     };
@@ -725,7 +741,7 @@ async fn run_darks_sweep(
         }
     }
     let _ = progress_tx.send(None);
-    *camera = Some((driver, w, h, cam));
+    *camera = Some((driver, w, h, native_w, cam));
 }
 
 #[cfg(test)]
@@ -825,6 +841,7 @@ mod tests {
             crate::settings::CameraDriver::Mock,
             true,
             None,
+            1280,
         )
         .unwrap();
         assert!(latest.jpeg.starts_with(&[0xFF, 0xD8]));
@@ -856,6 +873,7 @@ mod tests {
             crate::settings::CameraDriver::Mock,
             true,
             None,
+            1280,
         )
         .unwrap();
         assert_eq!(clean.persist_jpeg, clean.jpeg); // bake off → identical
@@ -868,6 +886,7 @@ mod tests {
             crate::settings::CameraDriver::Mock,
             true,
             Some(12.3),
+            1280,
         )
         .unwrap();
         assert_eq!(baked.jpeg, clean.jpeg); // dashboard copy stays clean
@@ -904,6 +923,7 @@ mod tests {
             crate::settings::CameraDriver::Mock,
             true,
             None,
+            1280,
         )
         .unwrap();
         assert_eq!((clean.width(), clean.height()), (960, 720)); // cropped
@@ -934,6 +954,7 @@ mod tests {
             crate::settings::CameraDriver::Mock,
             true,
             None,
+            1280,
         )
         .unwrap();
         let file = persist_frame(
@@ -1004,6 +1025,7 @@ mod tests {
             crate::settings::CameraDriver::Mock,
             true,
             None,
+            1280,
         )
         .unwrap();
         let (_, with_darks) = process_frame(
@@ -1013,6 +1035,7 @@ mod tests {
             crate::settings::CameraDriver::Mock,
             true,
             None,
+            1280,
         )
         .unwrap();
         assert!(

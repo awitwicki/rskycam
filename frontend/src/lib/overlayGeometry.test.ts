@@ -1,12 +1,24 @@
 import { describe, it, expect } from 'vitest'
-import type { OverlayGeometry } from '../api/types'
+import type { LensCalibration, OverlayGeometry } from '../api/types'
 import { altAzToImage, lstDeg, raDecToAltAz } from './astro'
 import { buildOverlayGeometry, cropGeometry } from './overlayGeometry'
+
+const calibration: LensCalibration = {
+  lensType: 'fisheye' as const,
+  focalLengthMm: 0.88 / Math.PI, // fPx = 880/π → horizon at 440 px
+  pixelSizeUm: 1,
+  pointingAzDeg: 0,
+  pointingAltDeg: 90,
+  rollDeg: 0,
+  flip: false,
+  centerOffsetXPx: 0,
+  centerOffsetYPx: 0,
+}
 
 const base = {
   time: new Date(Date.UTC(2026, 6, 14, 0, 0, 0)),
   location: { latitudeDeg: 50.45, longitudeDeg: 30.52 },
-  calibration: { cx: 480, cy: 480, radiusPx: 440, rotationDeg: 0, flip: false },
+  calibration,
   imageWidth: 960,
   imageHeight: 960,
 }
@@ -58,7 +70,7 @@ describe('buildOverlayGeometry', () => {
     const g = buildOverlayGeometry({ ...base, layers: { ...none, raDecGrid: true } })
     const lst = lstDeg(base.time, base.location.longitudeDeg)
     const ncp = raDecToAltAz(0, 90, base.location.latitudeDeg, lst)
-    const pole = altAzToImage(ncp.altDeg, ncp.azDeg, base.calibration)
+    const pole = altAzToImage(ncp.altDeg, ncp.azDeg, base.calibration, { frameWidth: 960, frameHeight: 960, nativeWidth: 960 })
 
     const meridiansAtPole = g.polylines.filter((pl) =>
       pl.points.some(([x, y]) => Math.hypot(x - pole.x, y - pole.y) < 0.01))
@@ -77,6 +89,37 @@ describe('buildOverlayGeometry', () => {
     })
     expect(g.polylines.length).toBeGreaterThan(0)
     expect(g.polylines.every((p) => p.opacity === 0.3)).toBe(true)
+  })
+
+  it('mask circle culls grid points outside it, but not cardinal labels', () => {
+    const layers = { ...none, altAzGrid: true, raDecGrid: true, cardinal: true }
+    const mask = { centerXPx: 500, centerYPx: 460, radiusPx: 200 }
+    const dist = (x: number, y: number) => Math.hypot(x - mask.centerXPx, y - mask.centerYPx)
+
+    const unmasked = buildOverlayGeometry({ ...base, layers })
+    expect(unmasked.polylines.some((pl) => pl.points.some(([x, y]) => dist(x, y) > mask.radiusPx)))
+      .toBe(true)
+
+    const g = buildOverlayGeometry({ ...base, layers, mask })
+    expect(g.polylines.length).toBeGreaterThan(0)
+    for (const pl of g.polylines) {
+      expect(pl.points.length).toBeGreaterThan(1)
+      for (const [x, y] of pl.points) {
+        expect(dist(x, y)).toBeLessThanOrEqual(mask.radiusPx + 0.01)
+      }
+    }
+    // cardinal labels are annotations, not sky lines — the mask leaves them
+    expect(g.labels.map((l) => l.text).sort()).toEqual(['E', 'N', 'S', 'W'])
+  })
+
+  it('rectilinear culls the horizon circle (θ > 85°)', () => {
+    const g = buildOverlayGeometry({
+      ...base,
+      calibration: { ...base.calibration, lensType: 'rectilinear' as const },
+      layers: { ...none, altAzGrid: true },
+    })
+    // alt-0 circle gone; alt 30/60 circles + 8 radials (lowest points culled)
+    expect(g.polylines).toHaveLength(10)
   })
 })
 

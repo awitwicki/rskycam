@@ -30,6 +30,30 @@ const MAX_RATIO: f64 = 32.0;
 /// of steps.
 const DAMPING: f64 = 0.35;
 
+/// Daytime starting exposure for a fresh hunt: short enough that even harsh
+/// sunlight is at worst a couple of SAT_CUT steps over, and close enough to
+/// a typical daylight exposure that an overcast sky converges upward in a
+/// few damped steps.
+const DAY_SEED_EXPOSURE_US: u64 = 1_000;
+
+/// Starting point for the auto-exposure hunt when no previous frame exists
+/// (service start). The manual settings are the user's night baseline —
+/// seeding a daytime restart from them (e.g. 20 s at gain 100) parades a
+/// minute of blown, high-gain frames through the dashboard while the loop
+/// walks all the way down. By day, start short and at the gain floor
+/// instead: gain — and thus noise — never has to descend at all.
+pub fn initial_params(night: bool, manual: CaptureParams, lim: &ExposureLimits) -> CaptureParams {
+    let (exposure_us, gain) = if night {
+        (manual.exposure_us, manual.gain)
+    } else {
+        (DAY_SEED_EXPOSURE_US, lim.min_gain)
+    };
+    CaptureParams {
+        exposure_us: exposure_us.clamp(lim.min_exposure_us, lim.max_exposure_us),
+        gain: gain.clamp(lim.min_gain, lim.max_gain),
+    }
+}
+
 /// Brightness is close enough to the target — the loop can stop hunting.
 pub fn converged(mean: f64, target: f64) -> bool {
     (mean - target).abs() <= DEADBAND
@@ -128,6 +152,29 @@ mod tests {
         min_gain: 1.0,
         max_gain: 16.0,
     };
+
+    #[test]
+    fn day_seed_starts_short_at_the_gain_floor_night_seed_uses_manual() {
+        // A daytime (re)start must NOT begin the hunt from the manual
+        // settings — those are the user's night baseline (e.g. 20 s at gain
+        // 100), and walking down from there parades a minute of blown,
+        // high-gain frames through the dashboard. Day starts short and at
+        // the gain floor; night keeps the manual baseline.
+        let manual = CaptureParams {
+            exposure_us: 20_000_000,
+            gain: 100.0,
+        };
+        let day = initial_params(false, manual, &LIM);
+        assert_eq!(day.gain, LIM.min_gain);
+        assert!(
+            day.exposure_us <= 10_000,
+            "day seed should be a short exposure, got {}us",
+            day.exposure_us
+        );
+        let night = initial_params(true, manual, &LIM);
+        assert_eq!(night.exposure_us, LIM.max_exposure_us); // manual clamped in
+        assert_eq!(night.gain, LIM.max_gain);
+    }
 
     #[test]
     fn inside_deadband_brightness_is_unchanged() {
