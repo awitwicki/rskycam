@@ -18,6 +18,7 @@ import { focalLengthPx, opticalCenter, type LensView } from '../lib/astro'
 import { useStatus } from '../hooks/useStatus'
 import { formatExposure, formatGain } from '../lib/format'
 import { buildOverlayGeometry } from '../lib/overlayGeometry'
+import { uid } from '../lib/uid'
 
 type EditorMode = 'calibrate' | 'crop'
 type TextTarget = `text:${string}`
@@ -408,7 +409,7 @@ export default function OverlayEditorPage() {
   const addField = () => {
     setDraft((d) => d && {
       ...d,
-      textFields: [...d.textFields, { id: crypto.randomUUID(), kind: 'time', x: 24, y: 110, fontSize: 18 }],
+      textFields: [...d.textFields, { id: uid(), kind: 'time', x: 24, y: 110, fontSize: 18 }],
     })
   }
 
@@ -594,7 +595,7 @@ export default function OverlayEditorPage() {
                     className="rounded border border-line bg-panel2 px-2 py-1 text-xs text-fg">
                     <option value="time">Frame time</option>
                     <option value="exposure">Exposure / gain</option>
-                    <option value="sensorTemp">Sensor temperature</option>
+                    <option value="sensorTemp">Outdoor temp (BME280)</option>
                   </select>
                   <button aria-label={`Remove ${f.kind} field`}
                     onClick={() => setDraft({ ...draft, textFields: draft.textFields.filter((x) => x.id !== f.id) })}
