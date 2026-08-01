@@ -33,4 +33,4 @@ if ! journalctl -u rskycam --since "-30s" --no-pager | grep -q "listening on"; t
 fi
 echo "rskycam active."
 REMOTE
-echo "-> http://rpiwhite.local:8080"
+echo "-> http://${HOST#*@}:8080"
