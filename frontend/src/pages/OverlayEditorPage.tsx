@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import { getApi } from '../api/client'
 import type {
   CropRect, ImageSettings, LensCalibration, LensType, MaskMode, OverlayGeometry,
-  OverlaySettings, OverlayTextField, Settings, TextFieldKind,
+  OverlayLayers, OverlaySettings, OverlayTextField, Settings, TextFieldKind,
 } from '../api/types'
 import { drawOverlay } from '../components/OverlayCanvas'
 import { Button, Card, NumberField, Toggle } from '../components/ui'
@@ -34,6 +34,12 @@ function isMaskHandle(h: DragTarget): h is MaskHandle {
 
 function isTextTarget(h: DragTarget): h is TextTarget {
   return h.startsWith('text:')
+}
+
+/** With every layer off there is nothing on screen to calibrate — the
+ *  Calibration card, skeleton and aim/zoom gestures all hide together. */
+function anyLayerOn(layers: OverlayLayers): boolean {
+  return layers.cardinal || layers.altAzGrid || layers.raDecGrid
 }
 
 function drawSkeleton(
@@ -267,7 +273,7 @@ export default function OverlayEditorPage() {
     drawOverlay(ctx, { ...geometry, labels: geometry.labels.filter((l) => l.layer !== 'text') })
     if (draftImage.crop) drawCropOverlay(ctx, draftImage.crop, w, h, mode === 'crop')
     if (mode === 'calibrate') {
-      drawSkeleton(ctx, draft.calibration, view, zenithMode)
+      if (anyLayerOn(draft.layers)) drawSkeleton(ctx, draft.calibration, view, zenithMode)
       if (draftImage.maskMode === 'circle') drawMaskHandles(ctx, draftImage)
       fieldBoxesRef.current = drawTextFields(ctx, draft.textFields, sampleFor)
     } else {
@@ -288,7 +294,9 @@ export default function OverlayEditorPage() {
     const onWheel = (e: WheelEvent) => {
       if (mode !== 'calibrate') return
       e.preventDefault()
-      setDraft((d) => d && { ...d, calibration: applyWheelZoom(d.calibration, e.deltaY) })
+      setDraft((d) => (d && anyLayerOn(d.layers))
+        ? { ...d, calibration: applyWheelZoom(d.calibration, e.deltaY) }
+        : d)
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', onWheel)
@@ -337,11 +345,14 @@ export default function OverlayEditorPage() {
     if (mode === 'crop') {
       target = draftImage.crop ? cropHitTest(p.x, p.y, draftImage.crop) : null
     } else {
-      // The N rotation handle exists only in zenith mode.
-      target = (zenithMode ? calibrationHitTest(p.x, p.y, draft.calibration, view) : null)
+      // The N rotation handle exists only in zenith mode. With all layers
+      // off the grid is invisible — aiming gestures are disabled so a stray
+      // drag can't silently corrupt the calibration.
+      const calibrating = anyLayerOn(draft.layers)
+      target = (calibrating && zenithMode ? calibrationHitTest(p.x, p.y, draft.calibration, view) : null)
         ?? (draftImage.maskMode === 'circle' ? maskHitTest(p.x, p.y, draftImage) : null)
         ?? hitTextField(p)
-        ?? startGridPan(p)
+        ?? (calibrating ? startGridPan(p) : null)
     }
     if (target) {
       setDragging(target)
@@ -533,7 +544,7 @@ export default function OverlayEditorPage() {
           </div>
         </Card>
 
-        <Card title="Calibration">
+        {anyLayerOn(draft.layers) && <Card title="Calibration">
           <div className="mb-3">
             <Toggle label="Camera points at the zenith (all-sky)" checked={zenithMode}
               onChange={setZenith} />
@@ -578,7 +589,7 @@ export default function OverlayEditorPage() {
               ? 'Pixel size is the sensor’s native value (imx219: 1.12 µm); binning is derived automatically. Drag the image to center the grid, drag the N handle to rotate it, scroll to fine-tune the focal length.'
               : 'The tilted camera is assumed level — the zenith is always toward the image top. Drag the image to aim the grid (azimuth/altitude), scroll to fine-tune the focal length.'}
           </p>
-        </Card>
+        </Card>}
 
         <Card title="Text fields"
           action={
