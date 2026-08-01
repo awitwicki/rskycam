@@ -1,5 +1,6 @@
 use crate::camera::CaptureParams;
 
+#[derive(Clone, Copy, Debug)]
 pub struct ExposureLimits {
     pub min_exposure_us: u64,
     pub max_exposure_us: u64,
@@ -57,6 +58,27 @@ pub fn initial_params(night: bool, manual: CaptureParams, lim: &ExposureLimits) 
 /// Brightness is close enough to the target — the loop can stop hunting.
 pub fn converged(mean: f64, target: f64) -> bool {
     (mean - target).abs() <= DEADBAND
+}
+
+/// Why a metered frame is worth persisting, if it is: brightness on target,
+/// OR the controller is railed and the next step wouldn't change anything —
+/// a moonless sky below the deadband at max exposure/gain is the best frame
+/// the camera can produce, and dropping it loses the whole night. `None`
+/// means the frame is mid-hunt (the next step still improves things) and
+/// should be dropped. The string goes verbatim into the per-frame log line.
+pub fn persist_reason(
+    mean: f64,
+    target: f64,
+    taken: CaptureParams,
+    lim: &ExposureLimits,
+) -> Option<&'static str> {
+    if converged(mean, target) {
+        Some("on target")
+    } else if next_params(mean, target, taken, lim) == taken {
+        Some("railed at limits")
+    } else {
+        None
+    }
 }
 
 /// Once brightness is on target, walk gain down toward its floor whenever
@@ -152,6 +174,46 @@ mod tests {
         min_gain: 1.0,
         max_gain: 16.0,
     };
+
+    #[test]
+    fn railed_frames_persist_mid_hunt_frames_do_not() {
+        // A moonless sky can sit below the deadband even at max exposure and
+        // max gain. The controller can do no better — that railed frame IS
+        // the night and must be persisted, or a whole dark night saves
+        // almost nothing (real incident: 28 frames instead of ~225).
+        let railed_dark = CaptureParams {
+            exposure_us: LIM.max_exposure_us,
+            gain: LIM.max_gain,
+        };
+        assert_eq!(
+            persist_reason(40.0, 100.0, railed_dark, &LIM),
+            Some("railed at limits")
+        );
+
+        // Too bright even at the floor: also railed, also worth keeping.
+        let railed_bright = CaptureParams {
+            exposure_us: LIM.min_exposure_us,
+            gain: LIM.min_gain,
+        };
+        assert_eq!(
+            persist_reason(240.0, 100.0, railed_bright, &LIM),
+            Some("railed at limits")
+        );
+
+        // Same darkness mid-hunt (exposure still has headroom): drop it —
+        // the next step will meaningfully improve the frame.
+        let hunting = CaptureParams {
+            exposure_us: 1_000_000,
+            gain: 2.0,
+        };
+        assert_eq!(persist_reason(40.0, 100.0, hunting, &LIM), None);
+
+        // On-target frames persist regardless of headroom.
+        assert_eq!(
+            persist_reason(104.0, 100.0, hunting, &LIM),
+            Some("on target")
+        );
+    }
 
     #[test]
     fn day_seed_starts_short_at_the_gain_floor_night_seed_uses_manual() {

@@ -453,17 +453,26 @@ where
                         let (latest, clean) =
                             process_frame(&frame, &s, &data_dir, driver, night, temp, native_w)?;
                         // Don't save frames auto-exposure is still hunting
-                        // through: only "clipped" (near-black/near-white mean)
-                        // used to be filtered, but a frame can be well off
-                        // target — and visibly blown or crushed in part of
-                        // the scene — without its whole-frame mean ever
-                        // reaching that extreme (e.g. a dark foreground
-                        // dragging the average down while the sky is already
-                        // blown white). Gate on actual convergence instead.
-                        // Manual exposure always saves.
-                        let keep = !s.camera.auto_exposure
-                            || auto_exposure::converged(mean, s.camera.target_brightness);
-                        if keep {
+                        // through — but a railed frame is not hunting: on a
+                        // moonless night the sky sits below the deadband even
+                        // at max exposure/gain, the controller can do no
+                        // better, and that frame IS the night (gating on
+                        // convergence alone once dropped a whole dark night
+                        // down to 28 saved frames). Manual exposure always
+                        // saves. Every verdict is logged so the Logs page can
+                        // answer "where did my frames go" without guesswork.
+                        let target = s.camera.target_brightness;
+                        let reason = if s.camera.auto_exposure {
+                            auto_exposure::persist_reason(mean, target, taken, &lim)
+                        } else {
+                            Some("manual exposure")
+                        };
+                        if let Some(reason) = reason {
+                            tracing::info!(
+                                "frame saved ({reason}): mean {mean:.1}/{target:.0}, {}us @ gain {:.2}",
+                                taken.exposure_us,
+                                taken.gain,
+                            );
                             // persistence failure must not kill the frame publication
                             match persist_frame(
                                 &data_dir,
@@ -495,6 +504,12 @@ where
                                 }
                                 Err(e) => tracing::error!("persisting frame: {e:#}"),
                             }
+                        } else {
+                            tracing::info!(
+                                "frame dropped (auto-exposure hunting): mean {mean:.1}/{target:.0}, {}us @ gain {:.2}",
+                                taken.exposure_us,
+                                taken.gain,
+                            );
                         }
                         Ok((latest, mean, taken))
                     });
@@ -506,6 +521,9 @@ where
             let (result, cam) = match join {
                 Ok(pair) => pair,
                 Err(join_err) => {
+                    tracing::error!(
+                        "no frame: capture task panicked ({join_err}); re-probing camera"
+                    );
                     send_status(
                         &status_tx,
                         CaptureState::CameraUnavailable,
@@ -527,6 +545,7 @@ where
             let (latest, mean, taken) = match result {
                 Ok(v) => v,
                 Err(e) => {
+                    tracing::warn!("no frame: capture failed ({e}); re-probing camera");
                     send_status(
                         &status_tx,
                         CaptureState::CameraUnavailable,
