@@ -1,7 +1,8 @@
 import type { ApiClient } from '../client'
 import type {
   ApiEvent, ArtifactState, DarkEntry, DarksLibrary, FrameInfo, FrameMeta, LightgraphData,
-  LensCalibration, NightDetail, NightSummary, OverlayGeometry, OverlayRequest, Settings, Status, TextFieldKind,
+  LensCalibration, LogsResponse, NightDetail, NightSummary, OverlayGeometry, OverlayRequest,
+  Settings, Status, TextFieldKind,
 } from '../types'
 import {
   altitudeOf, moonEquatorial, moonIllumination, sunEquatorial,
@@ -170,6 +171,27 @@ export class MockApi implements ApiClient {
       sunAltDeg.push(altitudeOf(t, sun.raDeg, sun.decDeg, latitudeDeg, longitudeDeg))
     }
     return { startIso: start.toISOString(), stepMinutes, sunAltDeg }
+  }
+
+  async getLogs(lines = 500): Promise<LogsResponse> {
+    // Synthetic but shaped like the real tracing file output, so the page
+    // demos level tinting and filtering without hardware.
+    const events: [string, string][] = [
+      ['INFO', 'rskycam::camera::mock: mock camera ready 1640x1232'],
+      ['INFO', 'rskycam: rskycam listening on http://0.0.0.0:8080'],
+      ['INFO', 'rskycam::processing: day timelapse for 2026-07-31 done (394 frames)'],
+      ['WARN', 'rskycam::capture: dark capture failed (20000000us, gain 100): timeout'],
+      ['INFO', 'rskycam::processing: keogram updated (581 columns)'],
+      ['ERROR', 'rskycam::capture: persisting frame: No space left on device (os error 28)'],
+      ['INFO', 'rskycam::capture: capture resumed after darks sweep'],
+    ]
+    const out: string[] = []
+    const start = Date.now() - events.length * 60_000
+    for (let i = 0; i < events.length; i++) {
+      const [level, msg] = events[i]
+      out.push(`${new Date(start + i * 60_000).toISOString()}  ${level} ${msg}`)
+    }
+    return { lines: out.slice(-lines) }
   }
 
   async getStatus(): Promise<Status> {

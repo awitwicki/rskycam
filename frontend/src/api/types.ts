@@ -89,6 +89,11 @@ export interface LightgraphData {
   sunAltDeg: number[]
 }
 
+// ── logs ───────────────────────────────────────────────────────
+export interface LogsResponse {
+  lines: string[] // tail of the service log, oldest first
+}
+
 // ── nights / gallery ───────────────────────────────────────────
 export type ArtifactState =
   | { state: 'ready'; url: string; sizeBytes: number }

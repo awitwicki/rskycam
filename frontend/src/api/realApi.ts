@@ -1,7 +1,7 @@
 import type { ApiClient } from './client'
 import type {
-  ApiEvent, DarksLibrary, FrameMeta, LightgraphData, NightDetail, NightSummary,
-  OverlayGeometry, OverlayRequest, Settings, Status,
+  ApiEvent, DarksLibrary, FrameMeta, LightgraphData, LogsResponse, NightDetail,
+  NightSummary, OverlayGeometry, OverlayRequest, Settings, Status,
 } from './types'
 
 const AUTH_FLAG = 'rskycam.auth'
@@ -69,6 +69,10 @@ export class RealApi implements ApiClient {
 
   getLightgraph(): Promise<LightgraphData> {
     return http('/api/lightgraph').then(json<LightgraphData>)
+  }
+
+  getLogs(lines = 500): Promise<LogsResponse> {
+    return http(`/api/logs?lines=${lines}`).then(json<LogsResponse>)
   }
 
   getOverlay(req: OverlayRequest): Promise<OverlayGeometry> {

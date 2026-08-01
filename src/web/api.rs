@@ -106,6 +106,33 @@ pub async fn latest_jpg(State(state): State<AppState>, Query(q): Query<LatestQue
         .into_response()
 }
 
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    #[serde(default)]
+    lines: Option<usize>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsResponse {
+    pub lines: Vec<String>,
+}
+
+pub async fn get_logs(
+    State(state): State<AppState>,
+    Query(q): Query<LogsQuery>,
+) -> Json<LogsResponse> {
+    let n = q
+        .lines
+        .unwrap_or(crate::logs::DEFAULT_LINES)
+        .min(crate::logs::MAX_LINES);
+    let data_dir = state.data_dir.clone();
+    let lines = tokio::task::spawn_blocking(move || crate::logs::read_tail(&data_dir, n))
+        .await
+        .unwrap_or_default();
+    Json(LogsResponse { lines })
+}
+
 pub fn frame_event_json(meta: &FrameMeta) -> String {
     serde_json::json!({
         "imageUrl": format!("/api/latest.jpg?ts={}", meta.timestamp),

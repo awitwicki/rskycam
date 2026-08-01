@@ -50,6 +50,7 @@ function apiWith(patchStatus: Partial<Status>): ApiClient {
     isAuthenticated: () => true,
     getStatus: async (): Promise<Status> => ({ ...(await base.getStatus()), ...patchStatus }),
     getLightgraph: base.getLightgraph.bind(base),
+    getLogs: base.getLogs.bind(base),
     latestImageUrl: () => 'data:,x',
     subscribe: () => () => {},
     getOverlay: base.getOverlay.bind(base),

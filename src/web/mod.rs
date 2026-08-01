@@ -192,6 +192,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/latest.jpg", get(api::latest_jpg))
         .route("/api/events", get(api::events))
         .route("/api/lightgraph", get(api::get_lightgraph))
+        .route("/api/logs", get(api::get_logs))
         .route("/api/overlay", post(api::post_overlay))
         .route(
             "/api/settings",

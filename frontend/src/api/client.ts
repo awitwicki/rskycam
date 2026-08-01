@@ -1,6 +1,6 @@
 import type {
-  ApiEvent, DarksLibrary, LightgraphData, NightDetail, NightSummary, OverlayGeometry,
-  OverlayRequest, Settings, Status,
+  ApiEvent, DarksLibrary, LightgraphData, LogsResponse, NightDetail, NightSummary,
+  OverlayGeometry, OverlayRequest, Settings, Status,
 } from './types'
 import { MockApi } from './mock/mockApi'
 import { RealApi } from './realApi'
@@ -14,6 +14,7 @@ export interface ApiClient {
   latestImageUrl(opts?: { raw?: boolean }): string
   subscribe(cb: (e: ApiEvent) => void): () => void
   getLightgraph(): Promise<LightgraphData>
+  getLogs(lines?: number): Promise<LogsResponse>
   getOverlay(req: OverlayRequest): Promise<OverlayGeometry>
   getSettings(): Promise<Settings>
   putSettings(s: Settings): Promise<void>

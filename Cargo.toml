@@ -32,6 +32,7 @@ time = "0.3"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -3,6 +3,7 @@ import Layout from './components/Layout'
 import { AuthProvider, useAuth } from './hooks/useAuth'
 import DashboardPage from './pages/DashboardPage'
 import LoginPage from './pages/LoginPage'
+import LogsPage from './pages/LogsPage'
 import NightDetailPage from './pages/NightDetailPage'
 import NightsPage from './pages/NightsPage'
 import OverlayEditorPage from './pages/OverlayEditorPage'
@@ -25,6 +26,7 @@ export default function App() {
               <Route path="/nights" element={<NightsPage />} />
               <Route path="/nights/:date" element={<NightDetailPage />} />
               <Route path="/overlay" element={<OverlayEditorPage />} />
+              <Route path="/logs" element={<LogsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>
           </Route>

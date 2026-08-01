@@ -196,6 +196,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn logs_endpoint_is_guarded_and_returns_the_file_tail() {
+        let h = harness();
+        let logs_dir = crate::logs::log_dir(&h.state.data_dir);
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(logs_dir.join("rskycam.2026-08-01.log"), "one\ntwo\n").unwrap();
+        let app = crate::web::router(h.state.clone());
+        let anon = app
+            .clone()
+            .oneshot(req("GET", "/api/logs", None, None))
+            .await
+            .unwrap();
+        assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+        let cookie = login_cookie(&app).await;
+        let ok = app
+            .oneshot(req("GET", "/api/logs?lines=1", Some(&cookie), None))
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(ok.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["lines"], serde_json::json!(["two"]));
+    }
+
+    #[tokio::test]
     async fn change_password_requires_old_password_and_persists() {
         let h = harness();
         let app = crate::web::router(h.state.clone());
