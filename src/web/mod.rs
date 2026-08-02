@@ -23,6 +23,8 @@ pub struct AppState {
     pub camera_caps: watch::Receiver<Option<crate::capture::CameraCaps>>,
     pub darks_cmd: mpsc::Sender<()>,
     pub darks_progress: watch::Receiver<Option<crate::darks::DarksProgress>>,
+    pub focus: watch::Receiver<Option<Arc<crate::capture::focus::FocusFrame>>>,
+    pub focus_shared: Arc<crate::capture::focus::FocusShared>,
     pub key: Key,
     pub data_dir: PathBuf,
     pub processing: crate::processing::ProcessingHandle,
@@ -200,6 +202,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/darks", get(api::get_darks).delete(api::delete_darks))
         .route("/api/darks/capture", post(api::start_darks_capture))
+        .route("/api/focus", post(api::post_focus))
+        .route("/api/focus.jpg", get(api::focus_jpg))
+        .route("/api/focus/star.png", get(api::focus_star_png))
         .route("/api/nights", get(nights::get_nights))
         .route(
             "/api/nights/{date}",
@@ -324,6 +329,8 @@ pub(crate) mod testing {
         // drained by every test.
         #[allow(dead_code)]
         pub darks_cmd_rx: mpsc::Receiver<()>,
+        pub focus_tx: watch::Sender<Option<Arc<crate::capture::focus::FocusFrame>>>,
+        pub focus_shared: Arc<crate::capture::focus::FocusShared>,
         // Kept alive only to hold the TempDir guard for the harness's lifetime.
         #[allow(dead_code)]
         pub dir: tempfile::TempDir,
@@ -345,6 +352,8 @@ pub(crate) mod testing {
         let (caps_tx, camera_caps) = watch::channel(None);
         let (darks_cmd_tx, darks_cmd_rx) = mpsc::channel::<()>(1);
         let (darks_progress_tx, darks_progress) = watch::channel(None);
+        let (focus_tx, focus) = watch::channel(None);
+        let focus_shared = Arc::new(crate::capture::focus::FocusShared::new());
         let processing = crate::processing::spawn_processing(
             // note: reuse the same Arc<RwLock<ConfigFile>> that goes into AppState
             cfg_arc.clone(),
@@ -363,6 +372,8 @@ pub(crate) mod testing {
             camera_caps,
             darks_cmd: darks_cmd_tx,
             darks_progress,
+            focus,
+            focus_shared: focus_shared.clone(),
             key: Key::generate(),
             data_dir: dir.path().to_path_buf(),
             processing,
@@ -374,6 +385,8 @@ pub(crate) mod testing {
             caps_tx,
             darks_progress_tx,
             darks_cmd_rx,
+            focus_tx,
+            focus_shared,
             dir,
         }
     }

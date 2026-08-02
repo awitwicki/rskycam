@@ -6,7 +6,25 @@ export interface FrameMeta {
   isNight: boolean
 }
 
-export type CaptureState = 'capturing' | 'camera_unavailable' | 'idle'
+export type CaptureState = 'capturing' | 'camera_unavailable' | 'idle' | 'focusing'
+
+// ── focus mode ─────────────────────────────────────────────────
+export interface FocusMeta {
+  timestamp: string // ISO 8601
+  hfd: number | null // null = no star found (clouds, lens cap)
+  starX: number // full-frame px of the detected star
+  starY: number
+  peak: number // 0..255
+  saturated: boolean // peak clipped — HFD untrustworthy
+  exposureUs: number
+  gain: number
+}
+
+export interface FocusInfo {
+  enabled: boolean
+  exposureUs: number
+  gain: number
+}
 
 export interface CaptureStatus {
   state: CaptureState
@@ -55,6 +73,7 @@ export interface CameraCaps {
   model: string
   maxWidth: number
   maxHeight: number
+  minExposureUs: number
 }
 
 export interface DarksProgress {
@@ -80,6 +99,7 @@ export interface Status {
   astro: AstroStatus
   camera: CameraCaps | null
   darksProgress: DarksProgress | null
+  focus: FocusInfo
 }
 
 /** Sun altitude sampled across a 24h window (local noon → noon). */
@@ -279,3 +299,4 @@ export interface Settings {
 export type ApiEvent =
   | { type: 'frame'; imageUrl: string; meta: FrameMeta }
   | { type: 'status'; status: Status }
+  | { type: 'focus'; meta: FocusMeta }

@@ -78,6 +78,8 @@ async fn main() -> anyhow::Result<()> {
         camera_caps: channels.camera_caps.clone(),
         darks_cmd: channels.darks_cmd.clone(),
         darks_progress: channels.darks_progress.clone(),
+        focus: channels.focus,
+        focus_shared: channels.focus_shared.clone(),
         key,
         data_dir,
         processing: processing.clone(),

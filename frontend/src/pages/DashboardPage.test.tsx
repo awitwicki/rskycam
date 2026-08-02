@@ -33,6 +33,16 @@ describe('DashboardPage', () => {
     expect(screen.queryByText(/weather/i)).not.toBeInTheDocument()
   })
 
+  it('shows a non-alarming focusing indicator during a focus session', async () => {
+    setApi(apiWith({
+      capture: { state: 'focusing' },
+    }))
+    render(<DashboardPage />)
+    await waitFor(() => expect(screen.getByText(/focusing/i)).toBeInTheDocument())
+    expect(screen.queryByText(/camera unavailable/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/focusing/i)).not.toHaveClass('text-danger')
+  })
+
   it('warns when the sensor is enabled but not detected', async () => {
     setApi(apiWith({ sensor: { state: 'not_detected', reading: null } }))
     render(<DashboardPage />)
@@ -64,5 +74,8 @@ function apiWith(patchStatus: Partial<Status>): ApiClient {
     startDarksCapture: base.startDarksCapture.bind(base),
     getDarksLibrary: base.getDarksLibrary.bind(base),
     clearDarks: base.clearDarks.bind(base),
+    setFocus: base.setFocus.bind(base),
+    focusImageUrl: base.focusImageUrl.bind(base),
+    focusStarUrl: base.focusStarUrl.bind(base),
   }
 }

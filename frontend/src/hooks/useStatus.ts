@@ -11,7 +11,7 @@ export function useStatus() {
     void api.getStatus().then(setStatus)
     return api.subscribe((e) => {
       if (e.type === 'status') setStatus(e.status)
-      else setFrame({ url: e.imageUrl, meta: e.meta })
+      else if (e.type === 'frame') setFrame({ url: e.imageUrl, meta: e.meta })
     })
   }, [])
 

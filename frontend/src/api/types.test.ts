@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import type { ArtifactState, OverlayGeometry, Settings, Status } from './types'
+import type { ApiEvent, ArtifactState, CaptureState, FocusMeta, OverlayGeometry, Settings, Status } from './types'
 
 describe('api contract', () => {
   it('accepts a fully-populated Status', () => {
@@ -9,7 +9,7 @@ describe('api contract', () => {
         lastFrame: { timestamp: '2026-07-14T01:00:00Z', exposureUs: 30_000_000, gain: 250, isNight: true },
       },
       astro: { sunAltDeg: -32.5, moonAltDeg: 12.1, moonPhasePct: 64, moonWaxing: true },
-      camera: { model: 'ZWO ASI120MM Mini', maxWidth: 1280, maxHeight: 960 },
+      camera: { model: 'ZWO ASI120MM Mini', maxWidth: 1280, maxHeight: 960, minExposureUs: 32 },
       sensor: { state: 'ok', reading: { temperatureC: 8.4, pressureHpa: 1013.2, humidityPct: 62 } },
       system: {
         model: 'Raspberry Pi 4 Model B Rev 1.4', cpuTempC: 52, cpuLoadAvg5m: 2.25, cpuCores: 4,
@@ -17,6 +17,7 @@ describe('api contract', () => {
         undervoltageNow: false, undervoltageSinceBoot: true,
       },
       darksProgress: { current: 3, total: 15 },
+      focus: { enabled: true, exposureUs: 1_000_000, gain: 8 },
     }
     expect(s.sensor.reading?.humidityPct).toBe(62)
 
@@ -81,5 +82,18 @@ describe('api contract', () => {
       maskMode: 'none', maskCenterXPx: 640, maskCenterYPx: 480, maskRadiusPx: 620, crop: null,
     }
     expect(noMaskNoCrop.crop).toBeNull()
+  })
+
+  it('accepts focus meta and the focusing capture state', () => {
+    const m: FocusMeta = {
+      timestamp: '2026-08-01T22:00:00Z', hfd: 4.2, starX: 512, starY: 384,
+      peak: 213, saturated: false, exposureUs: 1_000_000, gain: 8,
+    }
+    const noStar: FocusMeta = { ...m, hfd: null }
+    expect(noStar.hfd).toBeNull()
+    const st: CaptureState = 'focusing'
+    expect(st).toBe('focusing')
+    const ev: ApiEvent = { type: 'focus', meta: m }
+    expect(ev.type).toBe('focus')
   })
 })

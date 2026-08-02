@@ -59,6 +59,33 @@ fn unit(seed: u64) -> f64 {
     (splitmix(seed) >> 11) as f64 / (1u64 << 53) as f64
 }
 
+/// Gaussian blob with configurable blending.
+/// If `additive` is true, adds the Gaussian to existing pixels (so it's visible at any background level).
+/// If `additive` is false, uses max-blend (the Gaussian only brightens existing pixels).
+fn draw_star(img: &mut RgbImage, cx: f64, cy: f64, amp: f64, sigma: f64, additive: bool) {
+    let r = (3.0 * sigma).ceil() as i64;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let (x, y) = (cx as i64 + dx, cy as i64 + dy);
+            if !(0..img.width() as i64).contains(&x) || !(0..img.height() as i64).contains(&y) {
+                continue;
+            }
+            let d2 = (dx * dx + dy * dy) as f64;
+            let v = (amp * (-d2 / (2.0 * sigma * sigma)).exp()).clamp(0.0, 255.0) as u8;
+            let px = img.get_pixel_mut(x as u32, y as u32);
+            if additive {
+                *px = Rgb([
+                    (px.0[0] as u16 + v as u16).min(255) as u8,
+                    (px.0[1] as u16 + v as u16).min(255) as u8,
+                    (px.0[2] as u16 + v as u16).min(255) as u8,
+                ]);
+            } else {
+                *px = Rgb([px.0[0].max(v), px.0[1].max(v), px.0[2].max(v)]);
+            }
+        }
+    }
+}
+
 impl Camera for MockCamera {
     fn info(&self) -> CameraInfo {
         CameraInfo {
@@ -97,6 +124,11 @@ impl Camera for MockCamera {
         let bg = (base * scale).clamp(0.0, 235.0) as u8;
         let mut img = RgbImage::from_pixel(W, H, Rgb([bg, bg, bg / 2 + 40 * (bg > 0) as u8]));
 
+        // Focus "breathing": sigma drifts 1.2..2.0 over a 3-minute cycle so the
+        // focus page has something to show without hardware.
+        let phase = (now.timestamp().rem_euclid(180)) as f64 / 180.0;
+        let sigma = 1.6 + 0.4 * (std::f64::consts::TAU * phase).sin();
+
         let lst = astro::lst_deg(now, lon);
         for i in 0..STAR_COUNT {
             let ra = unit(i * 2 + 1) * 360.0;
@@ -111,10 +143,20 @@ impl Camera for MockCamera {
                 continue;
             }
             let mag = 60.0 + unit(i + 777) * 195.0;
-            let v = (mag * scale).clamp(0.0, 255.0) as u8;
-            let px = img.get_pixel_mut(x as u32, y as u32);
-            *px = Rgb([px.0[0].max(v), px.0[1].max(v), px.0[2].max(v)]);
+            draw_star(&mut img, pt.x, pt.y, mag * scale, sigma, false);
         }
+
+        // Guarantee one bright star near the crop center for the focus page.
+        // Use fixed amplitude (not scaled by day/night) and additive blending so it's
+        // always visible and measurable at any time of day.
+        draw_star(
+            &mut img,
+            W as f64 / 2.0 + 90.0,
+            H as f64 / 2.0 + 60.0,
+            200.0,
+            sigma,
+            true,
+        );
 
         Ok(Frame {
             image: img,
@@ -168,5 +210,37 @@ mod tests {
         assert_eq!((info.width, info.height), (1280, 960));
         assert!(info.min_exposure_us < info.max_exposure_us);
         assert!(info.min_gain < info.max_gain);
+    }
+
+    #[test]
+    fn mock_stars_are_measurable_blobs_not_single_pixels() {
+        let mut cam = MockCamera::new();
+        let f = cam
+            .capture(CaptureParams {
+                exposure_us: 5_000_000,
+                gain: 8.0,
+            })
+            .unwrap();
+        let (m, _) = crate::capture::focus::measure_star(&f.image, None);
+        let hfd = m.hfd.expect("mock sky must contain a measurable star");
+        assert!(hfd > 1.0 && hfd < 30.0, "hfd = {hfd}");
+        assert!(m.peak > 100, "peak = {}", m.peak);
+    }
+
+    #[test]
+    fn draw_star_hfd_grows_with_sigma() {
+        let mut sharp = RgbImage::from_pixel(200, 200, Rgb([10, 10, 10]));
+        let mut soft = RgbImage::from_pixel(200, 200, Rgb([10, 10, 10]));
+        draw_star(&mut sharp, 100.0, 100.0, 200.0, 1.0, true);
+        draw_star(&mut soft, 100.0, 100.0, 200.0, 2.5, true);
+        let h1 = crate::capture::focus::measure_star(&sharp, None)
+            .0
+            .hfd
+            .unwrap();
+        let h2 = crate::capture::focus::measure_star(&soft, None)
+            .0
+            .hfd
+            .unwrap();
+        assert!(h1 < h2, "{h1} !< {h2}");
     }
 }

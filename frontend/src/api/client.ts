@@ -26,6 +26,9 @@ export interface ApiClient {
   startDarksCapture(): Promise<void>
   getDarksLibrary(): Promise<DarksLibrary>
   clearDarks(): Promise<void>
+  setFocus(enabled: boolean, exposureUs?: number, gain?: number): Promise<void>
+  focusImageUrl(): string
+  focusStarUrl(): string
 }
 
 let instance: ApiClient | null = null

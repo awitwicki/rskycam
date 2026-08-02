@@ -1,9 +1,10 @@
-import { Camera, Compass, Images, LogOut, ScrollText, Settings } from 'lucide-react'
+import { Camera, Compass, Focus, Images, LogOut, ScrollText, Settings } from 'lucide-react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 
 const NAV = [
   { to: '/', label: 'Dashboard', icon: Camera },
+  { to: '/focus', label: 'Focus', icon: Focus },
   { to: '/nights', label: 'Nights', icon: Images },
   { to: '/overlay', label: 'Overlay', icon: Compass },
   { to: '/logs', label: 'Logs', icon: ScrollText },

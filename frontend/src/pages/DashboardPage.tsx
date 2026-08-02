@@ -110,6 +110,8 @@ export default function DashboardPage() {
         <Card title="Capture & system">
           {status?.capture.state === 'capturing' ? (
             <p className="text-ok">● Capturing</p>
+          ) : status?.capture.state === 'focusing' ? (
+            <p className="text-accent">● Focusing</p>
           ) : (
             <p className="text-danger">● {status?.capture.message ?? 'Camera unavailable'}</p>
           )}

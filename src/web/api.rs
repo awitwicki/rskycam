@@ -30,6 +30,14 @@ pub struct AstroStatus {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FocusInfo {
+    pub enabled: bool,
+    pub exposure_us: u64,
+    pub gain: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Status {
     pub capture: CaptureStatus,
     pub sensor: SensorStatus,
@@ -37,6 +45,7 @@ pub struct Status {
     pub astro: AstroStatus,
     pub camera: Option<crate::capture::CameraCaps>,
     pub darks_progress: Option<crate::darks::DarksProgress>,
+    pub focus: FocusInfo,
 }
 
 fn astro_status(s: &Settings, now: DateTime<Utc>) -> AstroStatus {
@@ -74,6 +83,11 @@ async fn build_status(state: &AppState) -> Status {
         astro: astro_status(&s, Utc::now()),
         camera: state.camera_caps.borrow().clone(),
         darks_progress: *state.darks_progress.borrow(),
+        focus: FocusInfo {
+            enabled: state.focus_shared.enabled(),
+            exposure_us: state.focus_shared.exposure_us(),
+            gain: state.focus_shared.gain(),
+        },
     }
 }
 
@@ -149,6 +163,7 @@ pub async fn events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(16);
     let mut latest = state.latest.clone();
+    let mut focus_rx = state.focus.clone();
 
     tokio::spawn(async move {
         let current: Option<Arc<LatestFrame>> = latest.borrow().clone();
@@ -156,6 +171,24 @@ pub async fn events(
             let ev = Event::default()
                 .event("frame")
                 .data(frame_event_json(&l.meta));
+            if tx.send(ev).await.is_err() {
+                return;
+            }
+        }
+        // Gate on focus being currently enabled — belt-and-braces alongside
+        // the capture loop clearing focus_tx back to None on disable/auto-
+        // exit: a brand-new connection must never see a prior session's
+        // stale frame just because the watch channel hasn't been reset yet.
+        let current_focus = state
+            .focus_shared
+            .enabled()
+            .then(|| focus_rx.borrow().clone())
+            .flatten();
+        if let Some(f) = current_focus {
+            let Ok(payload) = serde_json::to_string(&f.meta) else {
+                return;
+            };
+            let ev = Event::default().event("focus").data(payload);
             if tx.send(ev).await.is_err() {
                 return;
             }
@@ -177,6 +210,28 @@ pub async fn events(
                         if tx.send(ev).await.is_err() {
                             break; // client disconnected
                         }
+                    }
+                }
+                changed = focus_rx.changed() => {
+                    if changed.is_err() {
+                        break; // capture task's sender dropped
+                    }
+                    // A freshly cloned watch::Receiver can report changed()
+                    // immediately for a value it never observed (e.g. a
+                    // prior session's frame sent before this connection
+                    // existed) — gate on enabled() here too, not just on
+                    // the initial emit above, so a stale value can never
+                    // surface as a live `focus` event regardless of why
+                    // the channel wasn't (yet) reset to None.
+                    let meta = state
+                        .focus_shared
+                        .enabled()
+                        .then(|| focus_rx.borrow().as_ref().map(|f| f.meta.clone()))
+                        .flatten();
+                    if let Some(m) = meta {
+                        let Ok(payload) = serde_json::to_string(&m) else { continue };
+                        let ev = Event::default().event("focus").data(payload);
+                        if tx.send(ev).await.is_err() { break; }
                     }
                 }
                 _ = tick.tick() => {
@@ -394,6 +449,82 @@ pub async fn delete_darks(State(state): State<AppState>) -> Response {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FocusRequest {
+    pub enabled: bool,
+    #[serde(default)]
+    pub exposure_us: Option<u64>,
+    #[serde(default)]
+    pub gain: Option<f64>,
+}
+
+pub async fn post_focus(
+    State(state): State<AppState>,
+    Json(req): Json<FocusRequest>,
+) -> StatusCode {
+    if req.enabled {
+        // Floor at the connected camera's real exposure minimum (varies per
+        // driver/model) rather than a fixed value — a night-astrophotography
+        // floor would make daytime focus testing permanently overexposed.
+        let min_exp = state
+            .camera_caps
+            .borrow()
+            .as_ref()
+            .map(|c| c.min_exposure_us)
+            .unwrap_or(10_000);
+        let exp = req
+            .exposure_us
+            .unwrap_or_else(|| state.focus_shared.exposure_us())
+            .clamp(min_exp, 5_000_000);
+        state.focus_shared.enable(exp);
+        if let Some(gain) = req.gain {
+            let s = state.cfg.read().await.settings.clone();
+            state
+                .focus_shared
+                .set_gain(gain.clamp(s.camera.gain_min, s.camera.gain_max));
+        }
+    } else {
+        state.focus_shared.disable();
+    }
+    StatusCode::NO_CONTENT
+}
+
+pub async fn focus_jpg(State(state): State<AppState>) -> Response {
+    if !state.focus_shared.enabled() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    state.focus_shared.bump();
+    let Some(f) = state.focus.borrow().clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "image/jpeg"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        f.preview_jpeg.clone(),
+    )
+        .into_response()
+}
+
+pub async fn focus_star_png(State(state): State<AppState>) -> Response {
+    if !state.focus_shared.enabled() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(f) = state.focus.borrow().clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        f.star_png.clone(),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
@@ -442,6 +573,7 @@ mod tests {
                 model: "ZWO ASI120MM Mini".into(),
                 max_width: 1280,
                 max_height: 960,
+                min_exposure_us: 32,
             }))
             .unwrap();
         let app = crate::web::router(h.state.clone());
@@ -918,5 +1050,286 @@ mod tests {
             .starts_with("/api/latest.jpg?ts="));
         assert_eq!(v["meta"]["exposureUs"], 30_000_000);
         assert_eq!(v["meta"]["isNight"], true);
+    }
+
+    fn test_focus_frame() -> std::sync::Arc<crate::capture::focus::FocusFrame> {
+        use crate::camera::{Camera, CaptureParams};
+        let frame = crate::camera::mock::MockCamera::new()
+            .capture(CaptureParams {
+                exposure_us: 500_000,
+                gain: 4.0,
+            })
+            .unwrap();
+        std::sync::Arc::new(crate::capture::focus::focus_frame(&frame, None).unwrap())
+    }
+
+    async fn post_json(app: &axum::Router, cookie: &str, uri: &str, body: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn get_status_of(app: &axum::Router, cookie: &str, uri: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn focus_endpoints_full_flow() {
+        let h = harness();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+
+        // Disabled: both images 404 even if a frame exists.
+        h.focus_tx.send(Some(test_focus_frame())).unwrap();
+        assert_eq!(
+            get_status_of(&app, &cookie, "/api/focus.jpg").await,
+            StatusCode::NOT_FOUND
+        );
+
+        // Enable with a custom exposure.
+        assert_eq!(
+            post_json(
+                &app,
+                &cookie,
+                "/api/focus",
+                r#"{"enabled":true,"exposureUs":500000}"#
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            get_status_of(&app, &cookie, "/api/focus.jpg").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_status_of(&app, &cookie, "/api/focus/star.png").await,
+            StatusCode::OK
+        );
+
+        // Status carries the focus block.
+        let v = get_json(&app, &cookie, "/api/status").await;
+        assert_eq!(v["focus"]["enabled"], true);
+        assert_eq!(v["focus"]["exposureUs"], 500_000);
+
+        // Disable: images gone again.
+        assert_eq!(
+            post_json(&app, &cookie, "/api/focus", r#"{"enabled":false}"#).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            get_status_of(&app, &cookie, "/api/focus.jpg").await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn post_focus_clamps_exposure_and_omitted_keeps_current() {
+        let h = harness();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+
+        post_json(
+            &app,
+            &cookie,
+            "/api/focus",
+            r#"{"enabled":true,"exposureUs":1}"#,
+        )
+        .await;
+        let v = get_json(&app, &cookie, "/api/status").await;
+        assert_eq!(v["focus"]["exposureUs"], 10_000); // clamped up
+
+        post_json(&app, &cookie, "/api/focus", r#"{"enabled":true}"#).await;
+        let v = get_json(&app, &cookie, "/api/status").await;
+        assert_eq!(v["focus"]["exposureUs"], 10_000); // omitted -> kept
+    }
+
+    #[tokio::test]
+    async fn post_focus_exposure_floor_follows_the_connected_camera() {
+        let h = harness();
+        h.caps_tx
+            .send(Some(crate::capture::CameraCaps {
+                model: "Raspberry Pi CSI (rpicam)".into(),
+                max_width: 3280,
+                max_height: 2464,
+                min_exposure_us: 32,
+            }))
+            .unwrap();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+
+        // Below the camera's real floor (32us) but above the old fixed
+        // 10_000us floor -- must clamp to the camera's own minimum, not the
+        // stale hardcoded one, so daytime exposures well under 10ms work.
+        post_json(
+            &app,
+            &cookie,
+            "/api/focus",
+            r#"{"enabled":true,"exposureUs":5}"#,
+        )
+        .await;
+        let v = get_json(&app, &cookie, "/api/status").await;
+        assert_eq!(v["focus"]["exposureUs"], 32);
+    }
+
+    #[tokio::test]
+    async fn post_focus_sets_gain_clamped_to_settings_bounds() {
+        let h = harness();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+
+        // Default Settings::default() camera.gain_min/gain_max is 1.0..16.0.
+        post_json(
+            &app,
+            &cookie,
+            "/api/focus",
+            r#"{"enabled":true,"gain":4.5}"#,
+        )
+        .await;
+        let v = get_json(&app, &cookie, "/api/status").await;
+        assert_eq!(v["focus"]["gain"], 4.5);
+
+        // Out of range -> clamped, not rejected.
+        post_json(
+            &app,
+            &cookie,
+            "/api/focus",
+            r#"{"enabled":true,"gain":9999.0}"#,
+        )
+        .await;
+        let v = get_json(&app, &cookie, "/api/status").await;
+        assert_eq!(v["focus"]["gain"], 16.0);
+
+        // Omitted -> keeps the previously set value.
+        post_json(&app, &cookie, "/api/focus", r#"{"enabled":true}"#).await;
+        let v = get_json(&app, &cookie, "/api/status").await;
+        assert_eq!(v["focus"]["gain"], 16.0);
+    }
+
+    #[tokio::test]
+    async fn focus_jpg_get_keeps_the_session_alive() {
+        let h = harness();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        h.focus_shared.set_timeout_ms(80);
+        h.focus_shared.enable(1_000_000);
+        h.focus_tx.send(Some(test_focus_frame())).unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        get_status_of(&app, &cookie, "/api/focus.jpg").await; // bumps activity
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(h.focus_shared.active()); // alive only thanks to the GET bump
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!h.focus_shared.active()); // expired -> auto-disabled
+        assert!(!h.focus_shared.enabled());
+    }
+
+    #[tokio::test]
+    async fn events_stream_delivers_focus_events() {
+        let h = harness();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        // A live focus session: enabled AND a frame published. The initial
+        // SSE emit is gated on focus_shared.enabled(), so a leftover frame
+        // published while focus is off must not be enough (see the negative
+        // case below).
+        h.focus_shared.enable(1_000_000);
+        h.focus_tx.send(Some(test_focus_frame())).unwrap();
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = res.into_body().into_data_stream();
+        use futures::StreamExt;
+        // The focus frame was set before connect; the events task also emits it
+        // on the watch channel's initial changed() tick after any send. Collect
+        // chunks until we see the focus event or time out.
+        let text = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut acc = String::new();
+            while let Some(chunk) = body.next().await {
+                acc.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+                if acc.contains("event: focus") {
+                    break;
+                }
+            }
+            acc
+        })
+        .await
+        .expect("no focus event within 2s");
+        assert!(text.contains("event: focus"), "got: {text}");
+        assert!(text.contains("\"hfd\""), "got: {text}");
+        assert!(text.contains("saturated"), "got: {text}");
+    }
+
+    /// Guards the bug from the whole-branch review: a frame left over from a
+    /// prior focus session (channel never reset) must NOT be delivered as an
+    /// initial `focus` SSE event to a new connection while focus is disabled.
+    #[tokio::test]
+    async fn events_stream_does_not_deliver_stale_focus_event_when_disabled() {
+        let h = harness();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        // Simulate a leftover frame from a past session, but focus is
+        // currently disabled (the harness's FocusShared starts disabled).
+        h.focus_tx.send(Some(test_focus_frame())).unwrap();
+        assert!(!h.focus_shared.enabled());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = res.into_body().into_data_stream();
+        use futures::StreamExt;
+        // Collect everything delivered up to (and including) the first
+        // `status` tick — it always arrives every 2.5s, so waiting for it
+        // bounds how long we need to watch for an (unwanted) `focus` event.
+        // The timeout is well beyond the 2.5s cadence to absorb scheduling
+        // jitter when the full suite runs many tests concurrently.
+        let text = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut acc = String::new();
+            while let Some(chunk) = body.next().await {
+                acc.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+                if acc.contains("event: status") {
+                    break;
+                }
+            }
+            acc
+        })
+        .await
+        .expect("no status event within 10s");
+        assert!(!text.contains("event: focus"), "got: {text}");
     }
 }

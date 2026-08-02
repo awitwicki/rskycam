@@ -1,8 +1,8 @@
 import type { ApiClient } from '../client'
 import type {
-  ApiEvent, ArtifactState, DarkEntry, DarksLibrary, FrameInfo, FrameMeta, LightgraphData,
-  LensCalibration, LogsResponse, NightDetail, NightSummary, OverlayGeometry, OverlayRequest,
-  Settings, Status, TextFieldKind,
+  ApiEvent, ArtifactState, DarkEntry, DarksLibrary, FocusMeta, FrameInfo, FrameMeta,
+  LightgraphData, LensCalibration, LogsResponse, NightDetail, NightSummary, OverlayGeometry,
+  OverlayRequest, Settings, Status, TextFieldKind,
 } from '../types'
 import {
   altitudeOf, moonEquatorial, moonIllumination, sunEquatorial,
@@ -73,6 +73,9 @@ export class MockApi implements ApiClient {
   private darksEntries: DarkEntry[] = []
   private darksProgress: { current: number; total: number } | null = null
   private darksTimer: ReturnType<typeof setInterval> | null = null
+  private focusEnabled = false
+  private focusExposureUs = 1_000_000
+  private focusGain = 1
 
   constructor(opts: { renderFrame?: (time: Date, size: number) => string } = {}) {
     if (!opts.renderFrame && typeof Image !== 'undefined') {
@@ -199,8 +202,14 @@ export class MockApi implements ApiClient {
     this.cpuLoad = Math.min(4, Math.max(0.2, this.cpuLoad + (Math.random() - 0.5) * 0.3))
     return {
       astro: this.astroNow(),
-      capture: { state: 'capturing', lastFrame: this.frameMeta(new Date()) },
-      camera: { model: 'Mock synthetic sky', maxWidth: 1280, maxHeight: 960 },
+      capture: {
+        state: this.focusEnabled ? 'focusing' : 'capturing',
+        lastFrame: this.frameMeta(new Date()),
+      },
+      camera: {
+        model: 'Mock synthetic sky', maxWidth: 1280, maxHeight: 960,
+        minExposureUs: this.settings().camera.exposureUsMin,
+      },
       sensor: this.settings().sensor.enabled
         ? {
             state: 'ok',
@@ -225,6 +234,7 @@ export class MockApi implements ApiClient {
         undervoltageSinceBoot: true,
       },
       darksProgress: this.darksProgress,
+      focus: { enabled: this.focusEnabled, exposureUs: this.focusExposureUs, gain: this.focusGain },
     }
   }
 
@@ -256,9 +266,23 @@ export class MockApi implements ApiClient {
     })
     const f = setInterval(emitFrame, 5000)
     const s = setInterval(emitStatus, 2500)
+    const fo = setInterval(() => {
+      if (this.focusEnabled) cb({ type: 'focus', meta: this.mockFocusMeta() })
+    }, 1000)
     return () => {
       clearInterval(f)
       clearInterval(s)
+      clearInterval(fo)
+    }
+  }
+
+  private mockFocusMeta(): FocusMeta {
+    const breathe = Math.sin((Date.now() / 1000 / 180) * 2 * Math.PI)
+    return {
+      timestamp: new Date().toISOString(),
+      hfd: 3.6 + 1.2 * breathe + (Math.random() - 0.5) * 0.3,
+      starX: 730, starY: 540, peak: 213, saturated: false,
+      exposureUs: this.focusExposureUs, gain: this.focusGain,
     }
   }
 
@@ -415,5 +439,34 @@ export class MockApi implements ApiClient {
 
   async clearDarks(): Promise<void> {
     this.darksEntries = []
+  }
+
+  // ── focus mode ──
+  async setFocus(enabled: boolean, exposureUs?: number, gain?: number): Promise<void> {
+    this.focusEnabled = enabled
+    if (exposureUs !== undefined) this.focusExposureUs = exposureUs
+    if (gain !== undefined) {
+      const { gainMin, gainMax } = this.settings().camera
+      this.focusGain = Math.min(Math.max(gain, gainMin), gainMax)
+    }
+  }
+
+  focusImageUrl(): string {
+    return this.latestImageUrl()
+  }
+
+  focusStarUrl(): string {
+    const c = document.createElement('canvas')
+    c.width = 64
+    c.height = 64
+    const ctx = c.getContext('2d')!
+    ctx.fillStyle = '#0a0f14'
+    ctx.fillRect(0, 0, 64, 64)
+    const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 8)
+    g.addColorStop(0, '#fff')
+    g.addColorStop(1, 'transparent')
+    ctx.fillStyle = g
+    ctx.fillRect(0, 0, 64, 64)
+    return c.toDataURL('image/png')
   }
 }

@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom
 import Layout from './components/Layout'
 import { AuthProvider, useAuth } from './hooks/useAuth'
 import DashboardPage from './pages/DashboardPage'
+import FocusPage from './pages/FocusPage'
 import LoginPage from './pages/LoginPage'
 import LogsPage from './pages/LogsPage'
 import NightDetailPage from './pages/NightDetailPage'
@@ -23,6 +24,7 @@ export default function App() {
           <Route element={<RequireAuth />}>
             <Route element={<Layout />}>
               <Route path="/" element={<DashboardPage />} />
+              <Route path="/focus" element={<FocusPage />} />
               <Route path="/nights" element={<NightsPage />} />
               <Route path="/nights/:date" element={<NightDetailPage />} />
               <Route path="/overlay" element={<OverlayEditorPage />} />

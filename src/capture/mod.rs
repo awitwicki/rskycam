@@ -1,4 +1,5 @@
 pub mod auto_exposure;
+pub mod focus;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -63,6 +64,7 @@ pub enum CaptureState {
     Capturing,
     CameraUnavailable,
     Idle,
+    Focusing,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -90,6 +92,11 @@ pub struct CameraCaps {
     pub model: String,
     pub max_width: u32,
     pub max_height: u32,
+    /// Shortest exposure this camera accepts — the real hardware floor
+    /// (varies per driver/model), used to bound the focus-mode exposure
+    /// picker so daytime testing isn't stuck at a night-astrophotography
+    /// minimum.
+    pub min_exposure_us: u64,
 }
 
 impl From<&crate::camera::CameraInfo> for CameraCaps {
@@ -98,6 +105,7 @@ impl From<&crate::camera::CameraInfo> for CameraCaps {
             model: i.model.clone(),
             max_width: i.max_width,
             max_height: i.max_height,
+            min_exposure_us: i.min_exposure_us,
         }
     }
 }
@@ -108,6 +116,13 @@ pub struct CaptureChannels {
     pub camera_caps: watch::Receiver<Option<CameraCaps>>,
     pub darks_cmd: mpsc::Sender<()>,
     pub darks_progress: watch::Receiver<Option<crate::darks::DarksProgress>>,
+    // Consumed by the web layer's focus-mode endpoints (not yet wired up in
+    // this task): the focus viewer polls `focus`, and enables/bumps/disables
+    // focus mode through `focus_shared`.
+    #[allow(dead_code)]
+    pub focus: watch::Receiver<Option<Arc<focus::FocusFrame>>>,
+    #[allow(dead_code)]
+    pub focus_shared: Arc<focus::FocusShared>,
 }
 
 pub fn is_night(now: DateTime<Utc>, lat: f64, lon: f64) -> bool {
@@ -300,6 +315,9 @@ where
     let (darks_cmd_tx, mut darks_cmd_rx) = mpsc::channel::<()>(1);
     let (darks_progress_tx, darks_progress_rx) =
         watch::channel::<Option<crate::darks::DarksProgress>>(None);
+    let (focus_tx, focus_rx) = watch::channel::<Option<Arc<focus::FocusFrame>>>(None);
+    let focus_shared = Arc::new(focus::FocusShared::new());
+    let focus_for_loop = focus_shared.clone();
     let factory = Arc::new(factory);
 
     tokio::spawn(async move {
@@ -311,6 +329,12 @@ where
         // re-probing the camera.
         let mut camera: Option<CameraSlot> = None;
         let mut backoff = Duration::from_secs(1);
+        // Tracks whether the *previous* iteration was serving focus frames,
+        // so the true->false transition (explicit disable or the 60s
+        // no-viewer auto-exit inside FocusShared::active()) can clear
+        // focus_tx back to None exactly once — otherwise SSE/image-endpoint
+        // consumers would keep seeing the last session's stale frame.
+        let mut was_focusing = false;
 
         loop {
             let s = cfg.read().await.settings.clone();
@@ -371,6 +395,70 @@ where
                 }
             }
 
+            if focus_for_loop.active() {
+                was_focusing = true;
+                let (driver, cam_w, cam_h, native_w, mut cam) =
+                    camera.take().expect("camera present");
+                let info = cam.info();
+                let p = CaptureParams {
+                    exposure_us: focus_for_loop
+                        .exposure_us()
+                        .clamp(info.min_exposure_us, info.max_exposure_us),
+                    gain: focus_for_loop.gain().clamp(info.min_gain, info.max_gain),
+                };
+                let mask = (s.image.mask_mode == MaskMode::Circle).then_some((
+                    s.image.mask_center_x_px,
+                    s.image.mask_center_y_px,
+                    s.image.mask_radius_px,
+                ));
+                let join = tokio::task::spawn_blocking(move || {
+                    let r = cam.capture(p).and_then(|f| focus::focus_frame(&f, mask));
+                    (r, cam)
+                })
+                .await;
+                match join {
+                    Ok((Ok(ff), cam)) => {
+                        camera = Some((driver, cam_w, cam_h, native_w, cam));
+                        backoff = Duration::from_secs(1);
+                        let _ = focus_tx.send(Some(Arc::new(ff)));
+                        send_status(&status_tx, CaptureState::Focusing, None);
+                        // no sleep: next focus frame immediately
+                    }
+                    Ok((Err(e), cam)) => {
+                        camera = Some((driver, cam_w, cam_h, native_w, cam));
+                        tracing::warn!("focus frame failed ({e}); retrying");
+                        send_status(
+                            &status_tx,
+                            CaptureState::CameraUnavailable,
+                            Some(e.to_string()),
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                    }
+                    Err(join_err) => {
+                        tracing::error!("focus capture panicked ({join_err}); re-probing camera");
+                        send_status(
+                            &status_tx,
+                            CaptureState::CameraUnavailable,
+                            Some(format!("capture task panicked: {join_err}")),
+                        );
+                        camera = None;
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                    }
+                }
+                continue;
+            }
+
+            // Focus mode just turned off (explicit disable or the auto-exit
+            // inside FocusShared::active()) — clear the channel exactly once
+            // so new SSE connections and the focus image endpoints stop
+            // serving this session's last frame.
+            if was_focusing {
+                was_focusing = false;
+                let _ = focus_tx.send(None);
+            }
+
             let night = is_night(
                 Utc::now(),
                 s.location.latitude_deg,
@@ -387,6 +475,7 @@ where
                     Some(()) = darks_cmd_rx.recv() => {
                         run_darks_sweep(&mut camera, &s, &data_dir, &darks_progress_tx).await;
                     }
+                    _ = focus_for_loop.wake.notified() => {}
                 }
                 continue;
             }
@@ -604,6 +693,7 @@ where
                 Some(()) = darks_cmd_rx.recv() => {
                     run_darks_sweep(&mut camera, &s, &data_dir, &darks_progress_tx).await;
                 }
+                _ = focus_for_loop.wake.notified() => {}
             }
         }
     });
@@ -614,6 +704,8 @@ where
         camera_caps: caps_rx,
         darks_cmd: darks_cmd_tx,
         darks_progress: darks_progress_rx,
+        focus: focus_rx,
+        focus_shared,
     }
 }
 
@@ -1503,5 +1595,139 @@ mod tests {
         // And the sweep genuinely no-op'd: progress never left None.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         assert!(ch.darks_progress.borrow().is_none());
+    }
+
+    #[tokio::test]
+    async fn focus_mode_publishes_focus_frames_and_persists_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(test_cfg()));
+        let mut ch = spawn_capture(shared, dir.path().to_path_buf(), None);
+        ch.focus_shared.enable(200_000);
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                ch.focus.changed().await.unwrap();
+                if ch.focus.borrow().is_some() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("no focus frame within 10s");
+
+        let ff = ch.focus.borrow().clone().unwrap();
+        assert!(ff.preview_jpeg.starts_with(&[0xFF, 0xD8]));
+        assert_eq!(&ff.star_png[1..4], b"PNG");
+        assert_eq!(ff.meta.exposure_us, 200_000);
+        // Mock frame is 1280x960 -> full frame, uncropped
+        let preview = image::load_from_memory(&ff.preview_jpeg).unwrap();
+        assert_eq!((preview.width(), preview.height()), (1280, 960));
+        assert_eq!(ch.status.borrow().state, CaptureState::Focusing);
+        // focus frames never touch the disk
+        assert!(!dir.path().join("images").exists());
+    }
+
+    #[tokio::test]
+    async fn focus_tx_resets_to_none_after_explicit_disable() {
+        // Whole-branch review finding: focus_tx started at None but was only
+        // ever sent Some(frame) — nothing cleared it back to None on
+        // deactivation, so SSE/image-endpoint consumers kept seeing a stale
+        // session's frame. This guards the explicit-disable path (the other
+        // deactivation path, auto-exit, is covered by
+        // focus_mode_auto_exits_without_activity_and_capture_resumes).
+        let dir = tempfile::TempDir::new().unwrap();
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(test_cfg()));
+        let mut ch = spawn_capture(shared, dir.path().to_path_buf(), None);
+        ch.focus_shared.enable(200_000);
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                ch.focus.changed().await.unwrap();
+                if ch.focus.borrow().is_some() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("no focus frame within 10s");
+        assert!(ch.focus.borrow().is_some());
+
+        ch.focus_shared.disable();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if ch.focus.borrow().is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("focus_tx was never reset to None after explicit disable");
+    }
+
+    #[tokio::test]
+    async fn focus_mode_auto_exits_without_activity_and_capture_resumes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(test_cfg()));
+        let mut ch = spawn_capture(shared, dir.path().to_path_buf(), None);
+        // Enable with the default (generous) timeout first and wait for a
+        // real focus frame, so the None-reset assertion below actually
+        // proves a Some -> None transition rather than trivially observing
+        // a channel that was never touched. Only *after* a frame has
+        // arrived do we shrink the timeout to force a near-immediate
+        // auto-exit — decoupling "wait for a frame" from the short deadline
+        // avoids a race under CPU contention where the auto-exit could fire
+        // before the mock camera ever produces a first frame.
+        ch.focus_shared.enable(200_000);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                ch.focus.changed().await.unwrap();
+                if ch.focus.borrow().is_some() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("no focus frame within 10s");
+        ch.focus_shared.set_timeout_ms(300);
+
+        // Wait until it auto-disables (no bump() calls = no viewer).
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while ch.focus_shared.enabled() {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("focus never auto-exited");
+
+        // The capture loop must clear focus_tx back to None on the
+        // focusing -> not-focusing transition (auto-exit here), so stale
+        // frames don't leak to new SSE connections or the image endpoints
+        // of a future session. Poll briefly since the reset happens on the
+        // loop's next iteration after it observes active() == false.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if ch.focus.borrow().is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("focus_tx was never reset to None after auto-exit");
+
+        // Normal capture resumes and persists again.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                ch.latest.changed().await.unwrap();
+                if ch.latest.borrow().is_some() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("normal capture did not resume");
+        assert_eq!(ch.status.borrow().state, CaptureState::Capturing);
     }
 }

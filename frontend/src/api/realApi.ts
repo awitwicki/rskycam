@@ -1,6 +1,6 @@
 import type { ApiClient } from './client'
 import type {
-  ApiEvent, DarksLibrary, FrameMeta, LightgraphData, LogsResponse, NightDetail,
+  ApiEvent, DarksLibrary, FocusMeta, FrameMeta, LightgraphData, LogsResponse, NightDetail,
   NightSummary, OverlayGeometry, OverlayRequest, Settings, Status,
 } from './types'
 
@@ -60,6 +60,9 @@ export class RealApi implements ApiClient {
     es.addEventListener('status', (ev) => {
       cb({ type: 'status', status: JSON.parse((ev as MessageEvent).data) as Status })
     })
+    es.addEventListener('focus', (ev) => {
+      cb({ type: 'focus', meta: JSON.parse((ev as MessageEvent).data) as FocusMeta })
+    })
     return () => es.close()
   }
 
@@ -116,5 +119,20 @@ export class RealApi implements ApiClient {
 
   async clearDarks(): Promise<void> {
     await http('/api/darks', { method: 'DELETE' })
+  }
+
+  async setFocus(enabled: boolean, exposureUs?: number, gain?: number): Promise<void> {
+    const body: { enabled: boolean; exposureUs?: number; gain?: number } = { enabled }
+    if (exposureUs !== undefined) body.exposureUs = exposureUs
+    if (gain !== undefined) body.gain = gain
+    await http('/api/focus', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) })
+  }
+
+  focusImageUrl(): string {
+    return `/api/focus.jpg?ts=${Date.now()}`
+  }
+
+  focusStarUrl(): string {
+    return `/api/focus/star.png?ts=${Date.now()}`
   }
 }
