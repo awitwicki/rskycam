@@ -1,7 +1,7 @@
 name: Release
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -19,15 +19,6 @@ jobs:
           cargo_version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           echo "cargo_version=$cargo_version" >> "$GITHUB_OUTPUT"
           echo "full_version=${cargo_version}.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
-
-      - name: Check tag matches Cargo.toml version
-        if: github.ref_type == 'tag'
-        run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          if [ "${{ steps.version.outputs.cargo_version }}" != "$tag_version" ]; then
-            echo "tag $GITHUB_REF_NAME != Cargo.toml version ${{ steps.version.outputs.cargo_version }}" >&2
-            exit 1
-          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -65,7 +56,7 @@ jobs:
           sha256sum rskycam-aarch64.tar.gz > rskycam-aarch64.tar.gz.sha256
 
       - name: Upload dry-run artifact
-        if: github.ref_type != 'tag'
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: rskycam-aarch64
@@ -73,10 +64,19 @@ jobs:
             rskycam-aarch64.tar.gz
             rskycam-aarch64.tar.gz.sha256
 
+      - name: Tag release commit
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.version.outputs.full_version }}" -m "v${{ steps.version.outputs.full_version }}"
+          git push origin "v${{ steps.version.outputs.full_version }}"
+
       - name: Publish GitHub Release
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: "v${{ steps.version.outputs.full_version }}"
           name: "v${{ steps.version.outputs.full_version }}"
           files: |
             rskycam-aarch64.tar.gz
