@@ -351,6 +351,15 @@ pub fn spawn_processing(
                             // the previous night, then replay this one from disk.
                             // Capture the previous night's date before `other`
                             // moves into the spawn_blocking closure.
+                            tracing::info!(
+                                "night transition via frame arrival: {} -> {} (frame {})",
+                                other
+                                    .as_ref()
+                                    .map(|st| st.date.to_string())
+                                    .unwrap_or_else(|| "none".into()),
+                                frame.date,
+                                frame.file
+                            );
                             if let Some(prev_date) = other.as_ref().map(|st| st.date) {
                                 last_finalized = Some(prev_date);
                             }
@@ -455,6 +464,9 @@ pub fn spawn_processing(
                         continue; // night still running
                     }
                     let date = st.date;
+                    tracing::info!(
+                        "dawn tick finalizing {date} (now_night={now_night}, date_moved={date_moved})"
+                    );
                     state = None;
                     last_finalized = Some(date);
                     let dd = data_dir.clone();
