@@ -18,8 +18,8 @@ function navClass(isActive: boolean, base: string) {
 export default function Layout() {
   const { logout } = useAuth()
   return (
-    <div className="min-h-screen md:flex">
-      <aside className="hidden border-r border-line bg-panel px-4 py-6 md:flex md:w-52 md:flex-col">
+    <div className="min-h-screen md:flex md:h-screen md:overflow-hidden">
+      <aside className="hidden border-r border-line bg-panel px-4 py-6 md:flex md:w-52 md:flex-col md:overflow-y-auto">
         <div className="mb-8 font-mono text-lg text-accent">✦ rskycam</div>
         <nav className="flex flex-col gap-1">
           {NAV.map(({ to, label, icon: Icon }) => (
@@ -43,7 +43,7 @@ export default function Layout() {
         </button>
       </header>
 
-      <main className="flex-1 p-4 pb-24 md:p-6 md:pb-6">
+      <main className="flex-1 p-4 pb-24 md:overflow-y-auto md:p-6 md:pb-6">
         <Outlet />
       </main>
 
