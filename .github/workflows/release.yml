@@ -13,13 +13,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Compute version
+        id: version
+        run: |
+          cargo_version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "cargo_version=$cargo_version" >> "$GITHUB_OUTPUT"
+          echo "full_version=${cargo_version}.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
       - name: Check tag matches Cargo.toml version
         if: github.ref_type == 'tag'
         run: |
-          cargo_version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           tag_version="${GITHUB_REF_NAME#v}"
-          if [ "$cargo_version" != "$tag_version" ]; then
-            echo "tag $GITHUB_REF_NAME != Cargo.toml version $cargo_version" >&2
+          if [ "${{ steps.version.outputs.cargo_version }}" != "$tag_version" ]; then
+            echo "tag $GITHUB_REF_NAME != Cargo.toml version ${{ steps.version.outputs.cargo_version }}" >&2
             exit 1
           fi
 
@@ -71,6 +77,7 @@ jobs:
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
+          name: "v${{ steps.version.outputs.full_version }}"
           files: |
             rskycam-aarch64.tar.gz
             rskycam-aarch64.tar.gz.sha256
