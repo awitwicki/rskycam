@@ -24,7 +24,9 @@ discard() {
   exit 0
 }
 
-[ -f "$TARBALL" ] && [ -f "$TAG_FILE" ] || exit 0
+if [ ! -f "$TARBALL" ] || [ ! -f "$TAG_FILE" ]; then
+  exit 0
+fi
 
 tag=$(cat "$TAG_FILE")
 # Strict tag shape: it becomes part of a URL fetched as root, so an
@@ -52,7 +54,9 @@ tmp=$(mktemp -d -p "$DATA_DIR")
 trap 'rm -rf "$tmp"' EXIT
 cp "$TARBALL" "$tmp/rskycam-aarch64.tar.gz" || discard "cannot copy staged tarball"
 actual=$(sha256sum "$tmp/rskycam-aarch64.tar.gz" | awk '{print $1}')
-[ -n "$expected" ] && [ "$expected" = "$actual" ] || discard "checksum mismatch"
+if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+  discard "checksum mismatch"
+fi
 
 tar -xzf "$tmp/rskycam-aarch64.tar.gz" -C "$tmp" rskycam || discard "tar extraction failed"
 chmod +x "$tmp/rskycam"
