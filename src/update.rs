@@ -107,6 +107,110 @@ pub async fn check(state: &UpdateState) -> UpdateInfo {
     info
 }
 
+pub enum StageError {
+    /// No newer release is known — nothing to do (HTTP 409).
+    NoUpdate,
+    /// Download/verify failed; update dir cleaned, service keeps running.
+    Failed(String),
+}
+
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Download + verify the newest release into `<data_dir>/update/` and
+/// write the `tag` marker the root apply hook consumes. Does NOT exit —
+/// the caller decides when to fire the exit hook.
+pub async fn stage(state: &UpdateState, data_dir: &std::path::Path) -> Result<String, StageError> {
+    let info = check(state).await;
+    if !info.update_available {
+        return Err(StageError::NoUpdate);
+    }
+    let tag = info.latest.ok_or(StageError::NoUpdate)?;
+    let cfg = state.config.clone();
+    let dir = data_dir.join("update");
+    let staged_tag = tag.clone();
+    tokio::task::spawn_blocking(move || stage_blocking(&cfg, &dir, &staged_tag))
+        .await
+        .map_err(|e| StageError::Failed(format!("staging task panicked: {e}")))??;
+    Ok(tag)
+}
+
+fn stage_blocking(cfg: &UpdateConfig, dir: &std::path::Path, tag: &str) -> Result<(), StageError> {
+    let fail = |msg: String| {
+        let _ = std::fs::remove_dir_all(dir);
+        Err(StageError::Failed(msg))
+    };
+    let _ = std::fs::remove_dir_all(dir);
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return fail(format!("creating {}: {e}", dir.display()));
+    }
+    let tarball = dir.join("rskycam-aarch64.tar.gz");
+    let sha_file = dir.join("rskycam-aarch64.tar.gz.sha256");
+    let base = format!("{}/{tag}", cfg.download_base);
+    if let Err(e) = curl_download(
+        cfg,
+        &format!("{base}/rskycam-aarch64.tar.gz"),
+        &tarball,
+        300,
+    ) {
+        return fail(e);
+    }
+    if let Err(e) = curl_download(
+        cfg,
+        &format!("{base}/rskycam-aarch64.tar.gz.sha256"),
+        &sha_file,
+        30,
+    ) {
+        return fail(e);
+    }
+    let expected = match std::fs::read_to_string(&sha_file) {
+        Ok(s) => match s.split_whitespace().next() {
+            Some(hex) => hex.to_ascii_lowercase(),
+            None => return fail("empty .sha256 asset".into()),
+        },
+        Err(e) => return fail(format!("reading checksum: {e}")),
+    };
+    let actual = match std::fs::read(&tarball) {
+        Ok(bytes) => sha256_hex(&bytes),
+        Err(e) => return fail(format!("reading tarball: {e}")),
+    };
+    if expected != actual {
+        return fail(format!(
+            "checksum mismatch: expected {expected}, got {actual}"
+        ));
+    }
+    if let Err(e) = std::fs::write(dir.join("tag"), tag) {
+        return fail(format!("writing tag marker: {e}"));
+    }
+    Ok(())
+}
+
+fn curl_download(
+    cfg: &UpdateConfig,
+    url: &str,
+    out: &std::path::Path,
+    max_time_s: u32,
+) -> Result<(), String> {
+    let status = std::process::Command::new(&cfg.curl)
+        .args(["-fsSL", "--max-time", &max_time_s.to_string(), "-o"])
+        .arg(out)
+        .arg(url)
+        .status()
+        .map_err(|e| format!("running {:?}: {e}", cfg.curl))?;
+    if !status.success() {
+        return Err(format!(
+            "downloading {url} failed (curl exit {:?})",
+            status.code()
+        ));
+    }
+    Ok(())
+}
+
 fn fetch_latest_tag(cfg: &UpdateConfig) -> Result<String, String> {
     let out = std::process::Command::new(&cfg.curl)
         .args(["-fsSL", "--max-time", "10", &cfg.api_url])

@@ -1,12 +1,35 @@
 //! Self-update endpoints: version/release check and apply.
 
 use axum::extract::State;
-use axum::response::Json;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json, Response};
 
 use super::AppState;
 
 pub async fn get_update(State(state): State<AppState>) -> Json<crate::update::UpdateInfo> {
     Json(crate::update::check(&state.update).await)
+}
+
+pub async fn post_apply(State(state): State<AppState>) -> Response {
+    match crate::update::stage(&state.update, &state.data_dir).await {
+        Ok(tag) => {
+            let update = state.update.clone();
+            // Respond first; exit shortly after so the 202 flushes.
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                tracing::info!("update to {tag} staged; exiting so systemd applies it");
+                (update.exit_hook)();
+            });
+            StatusCode::ACCEPTED.into_response()
+        }
+        Err(crate::update::StageError::NoUpdate) => {
+            (StatusCode::CONFLICT, "no newer release known").into_response()
+        }
+        Err(crate::update::StageError::Failed(msg)) => {
+            tracing::error!("staging update: {msg}");
+            (StatusCode::BAD_GATEWAY, msg).into_response()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -131,5 +154,123 @@ esac
         assert_eq!(body["updateAvailable"], false);
         assert_eq!(body["latest"], serde_json::Value::Null);
         assert!(body["error"].as_str().unwrap().contains("no-curl"));
+    }
+
+    /// Create a real mini tarball containing an executable `rskycam`
+    /// stub, plus its correct .sha256 asset, in the assets dir.
+    fn make_release_assets(assets: &Path) {
+        std::fs::write(assets.join("rskycam"), b"#!/bin/sh\necho fake rskycam\n").unwrap();
+        let ok = std::process::Command::new("tar")
+            .args(["-czf", "asset.tar.gz", "rskycam"])
+            .current_dir(assets)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "tar failed");
+        let bytes = std::fs::read(assets.join("asset.tar.gz")).unwrap();
+        let hex = crate::update::sha256_hex(&bytes);
+        std::fs::write(
+            assets.join("asset.sha256"),
+            format!("{hex}  rskycam-aarch64.tar.gz\n"),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_stages_the_release_and_fires_the_exit_hook() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut h = harness();
+        let assets = update_state_with_fake_curl(&mut h, r#"{"tag_name":"v99.0.0.1"}"#);
+        make_release_assets(&assets);
+        let exited = Arc::new(AtomicBool::new(false));
+        let flag = exited.clone();
+        // Rebuild state with a flag-setting exit hook but the same config.
+        let cfg = h.state.update.config.clone();
+        h.state.update = Arc::new(crate::update::UpdateState::with_exit_hook(
+            cfg,
+            Box::new(move || flag.store(true, Ordering::SeqCst)),
+        ));
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/update/apply")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+
+        let update_dir = h.state.data_dir.join("update");
+        assert!(update_dir.join("rskycam-aarch64.tar.gz").is_file());
+        assert_eq!(
+            std::fs::read_to_string(update_dir.join("tag")).unwrap(),
+            "v99.0.0.1"
+        );
+        // Exit hook fires ~500ms after the response.
+        for _ in 0..40 {
+            if exited.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("exit hook never fired");
+    }
+
+    #[tokio::test]
+    async fn apply_with_no_newer_release_is_409() {
+        let mut h = harness();
+        // Unparseable tag -> update_available false.
+        update_state_with_fake_curl(&mut h, r#"{"tag_name":"garbage"}"#);
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/update/apply")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn checksum_mismatch_is_502_and_cleans_the_staging_dir() {
+        let mut h = harness();
+        let assets = update_state_with_fake_curl(&mut h, r#"{"tag_name":"v99.0.0.1"}"#);
+        make_release_assets(&assets);
+        std::fs::write(
+            assets.join("asset.sha256"),
+            "deadbeef  rskycam-aarch64.tar.gz\n",
+        )
+        .unwrap();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/update/apply")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        assert!(
+            !h.state.data_dir.join("update").exists(),
+            "staging dir not cleaned"
+        );
     }
 }

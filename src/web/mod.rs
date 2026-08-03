@@ -205,6 +205,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/darks", get(api::get_darks).delete(api::delete_darks))
         .route("/api/darks/capture", post(api::start_darks_capture))
         .route("/api/update", get(update::get_update))
+        .route("/api/update/apply", post(update::post_apply))
         .route("/api/focus", post(api::post_focus))
         .route("/api/focus.jpg", get(api::focus_jpg))
         .route("/api/focus/star.png", get(api::focus_star_png))
