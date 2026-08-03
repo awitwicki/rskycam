@@ -33,17 +33,29 @@ tag=$(cat "$TAG_FILE")
 sha_url="https://github.com/$REPO/releases/download/$tag/rskycam-aarch64.tar.gz.sha256"
 sha=$(curl -fsSL --max-time 15 "$sha_url") || discard "cannot fetch checksum (offline?)"
 expected=$(echo "$sha" | awk '{print $1}')
-actual=$(sha256sum "$TARBALL" | awk '{print $1}')
-[ -n "$expected" ] && [ "$expected" = "$actual" ] || discard "checksum mismatch"
 
+# Copy the staged tarball into our root-owned tmp dir and never read
+# $TARBALL again after this single copy: $UPDATE_DIR is writable by the
+# unprivileged rskycam service user, so hashing and extracting from
+# $TARBALL as two separate reads would leave a TOCTOU window where a
+# compromised service user swaps the file between the checksum check and
+# the extraction. Hashing and extracting the same already-copied,
+# root-owned file closes that window.
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-tar -xzf "$TARBALL" -C "$tmp" rskycam || discard "tar extraction failed"
+cp "$TARBALL" "$tmp/rskycam-aarch64.tar.gz" || discard "cannot copy staged tarball"
+actual=$(sha256sum "$tmp/rskycam-aarch64.tar.gz" | awk '{print $1}')
+[ -n "$expected" ] && [ "$expected" = "$actual" ] || discard "checksum mismatch"
+
+tar -xzf "$tmp/rskycam-aarch64.tar.gz" -C "$tmp" rskycam || discard "tar extraction failed"
 chmod +x "$tmp/rskycam"
 "$tmp/rskycam" --version >/dev/null 2>&1 || discard "staged binary failed --version"
 
 cp "$BIN" "$BIN.old" 2>/dev/null || true
-install -m 755 "$tmp/rskycam" "$BIN"
+if ! install -m 755 "$tmp/rskycam" "$BIN"; then
+  log "installing new binary failed — leaving staged update in place for retry"
+  exit 0
+fi
 rm -rf "$UPDATE_DIR"
 log "installed $("$BIN" --version 2>/dev/null || echo 'rskycam (version unknown)')"
 exit 0
