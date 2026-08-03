@@ -19,7 +19,7 @@ it, see [README.md](README.md).
 **Update:** re-run the install command from the README. It replaces the
 binary, udev rule and service, restarts, and never touches
 `/var/lib/rskycam` (config + images). Pin a version with
-`sudo RSKYCAM_VERSION=v0.5.0.12 bash`.
+`sudo RSKYCAM_VERSION=v0.5.0.9 bash`.
 
 **Logs:** `journalctl -u rskycam -f` (journald handles rotation).
 

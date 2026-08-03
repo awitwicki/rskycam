@@ -9,7 +9,7 @@
 # Re-run: updates binary/unit/udev rule and restarts the service. Never
 # touches /var/lib/rskycam (config, images).
 #
-# Pin a version:  curl ... | sudo RSKYCAM_VERSION=v0.5.0.12 bash
+# Pin a version:  curl ... | sudo RSKYCAM_VERSION=v0.5.0.9 bash
 set -euo pipefail
 
 REPO="awitwicki/rskycam"
