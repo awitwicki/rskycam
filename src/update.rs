@@ -16,6 +16,11 @@ pub struct UpdateConfig {
     pub curl: PathBuf,
     pub api_url: String,
     pub download_base: String,
+    /// The root pre-start hook that must be installed (by the installer,
+    /// as part of the current systemd unit) for a staged update to ever
+    /// actually get applied. Checked before staging anything — see
+    /// `crate::web::update::post_apply`.
+    pub hook_path: PathBuf,
 }
 
 impl Default for UpdateConfig {
@@ -24,6 +29,7 @@ impl Default for UpdateConfig {
             curl: "curl".into(),
             api_url: "https://api.github.com/repos/awitwicki/rskycam/releases/latest".into(),
             download_base: "https://github.com/awitwicki/rskycam/releases/download".into(),
+            hook_path: "/usr/local/bin/rskycam-apply-update".into(),
         }
     }
 }
@@ -131,6 +137,15 @@ pub async fn stage(state: &UpdateState, data_dir: &std::path::Path) -> Result<St
         return Err(StageError::NoUpdate);
     }
     let tag = info.latest.ok_or(StageError::NoUpdate)?;
+    // The root apply hook (installer/apply-update.sh) only accepts tags
+    // shaped `v X.Y.Z(.N)?` — a tag missing the `v` would stage fine here
+    // and then be silently discarded by the hook as malformed. Fail fast
+    // with a clear message instead of the user seeing a 2-minute timeout.
+    if !tag.starts_with('v') {
+        return Err(StageError::Failed(format!(
+            "release tag {tag:?} is missing the required 'v' prefix"
+        )));
+    }
     let cfg = state.config.clone();
     let dir = data_dir.join("update");
     let staged_tag = tag.clone();
@@ -197,7 +212,16 @@ fn curl_download(
     max_time_s: u32,
 ) -> Result<(), String> {
     let status = std::process::Command::new(&cfg.curl)
-        .args(["-fsSL", "--max-time", &max_time_s.to_string(), "-o"])
+        .args([
+            "-fsSL",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-time",
+            &max_time_s.to_string(),
+            "-o",
+        ])
         .arg(out)
         .arg(url)
         .status()
@@ -213,7 +237,16 @@ fn curl_download(
 
 fn fetch_latest_tag(cfg: &UpdateConfig) -> Result<String, String> {
     let out = std::process::Command::new(&cfg.curl)
-        .args(["-fsSL", "--max-time", "10", &cfg.api_url])
+        .args([
+            "-fsSL",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-time",
+            "10",
+            &cfg.api_url,
+        ])
         .output()
         .map_err(|e| format!("running {:?}: {e}", cfg.curl))?;
     if !out.status.success() {

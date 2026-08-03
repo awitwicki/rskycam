@@ -358,12 +358,18 @@ pub(crate) mod testing {
         let (darks_progress_tx, darks_progress) = watch::channel(None);
         let (focus_tx, focus) = watch::channel(None);
         let focus_shared = Arc::new(crate::capture::focus::FocusShared::new());
+        // A file that genuinely exists, so the harness's default config
+        // doesn't trip the "hook not installed" precondition in
+        // post_apply for tests that don't care about it either way.
+        let hook_path = dir.path().join("fake-hook");
+        std::fs::write(&hook_path, b"#!/bin/sh\nexit 0\n").unwrap();
         let update = Arc::new(crate::update::UpdateState::with_exit_hook(
             crate::update::UpdateConfig {
                 // nonexistent binary: checks fail fast in tests that don't care
                 curl: dir.path().join("no-curl"),
                 api_url: "http://unused.invalid".into(),
                 download_base: "http://unused.invalid".into(),
+                hook_path,
             },
             Box::new(|| {}), // never exit the test process
         ));

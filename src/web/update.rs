@@ -11,6 +11,17 @@ pub async fn get_update(State(state): State<AppState>) -> Json<crate::update::Up
 }
 
 pub async fn post_apply(State(state): State<AppState>) -> Response {
+    // The exit-then-restart dance only works if systemd will actually run
+    // the root apply hook on restart (new unit + hook installed). Without
+    // it, staging+exiting leaves the camera down until someone manually
+    // restarts the service — so refuse before even downloading anything.
+    if !state.update.config.hook_path.is_file() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "self-update hook not installed on this host — re-run the installer (see DEVELOPMENT.md § Self-update) before using Update",
+        )
+            .into_response();
+    }
     match crate::update::stage(&state.update, &state.data_dir).await {
         Ok(tag) => {
             let update = state.update.clone();
@@ -79,11 +90,16 @@ esac
         std::fs::create_dir_all(&assets).unwrap();
         std::fs::write(assets.join("latest.json"), latest_json).unwrap();
         let curl = write_fake_curl(&h.state.data_dir, &assets);
+        // Reuse whatever hook_path the harness already set up (a file that
+        // genuinely exists), so apply tests exercise the real "staged and
+        // ready to apply" path rather than tripping the hook-missing 503.
+        let hook_path = h.state.update.config.hook_path.clone();
         h.state.update = Arc::new(crate::update::UpdateState::with_exit_hook(
             crate::update::UpdateConfig {
                 curl,
                 api_url: "http://gh.invalid/releases/latest".into(),
                 download_base: "http://gh.invalid/releases/download".into(),
+                hook_path,
             },
             Box::new(|| {}),
         ));
@@ -272,5 +288,107 @@ esac
             !h.state.data_dir.join("update").exists(),
             "staging dir not cleaned"
         );
+    }
+
+    #[tokio::test]
+    async fn apply_endpoint_requires_a_session() {
+        let h = harness();
+        let app = crate::web::router(h.state.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/update/apply")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn apply_is_503_when_the_root_hook_is_not_installed() {
+        let mut h = harness();
+        let assets = update_state_with_fake_curl(&mut h, r#"{"tag_name":"v99.0.0.1"}"#);
+        make_release_assets(&assets);
+        // Point hook_path at a path that does not exist on disk — simulates
+        // a host where the binary was updated by some other means (e.g.
+        // scripts/deploy-pi.sh) without the installer ever (re-)installing
+        // the systemd unit + hook.
+        let cfg = crate::update::UpdateConfig {
+            hook_path: h.state.data_dir.join("no-such-hook"),
+            ..h.state.update.config.clone()
+        };
+        h.state.update = Arc::new(crate::update::UpdateState::with_exit_hook(
+            cfg,
+            Box::new(|| panic!("exit hook must not fire when the apply hook is missing")),
+        ));
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/update/apply")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // Nothing should have been downloaded/staged either — the check
+        // happens before `stage()` is even called.
+        assert!(
+            !h.state.data_dir.join("update").exists(),
+            "should not have staged anything when the hook is missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_succeeds_when_the_root_hook_is_installed() {
+        // Confirms the new hook_path precondition doesn't false-positive
+        // block a real apply when a genuinely-existing hook file is
+        // configured (as the harness's default and production both do).
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut h = harness();
+        let assets = update_state_with_fake_curl(&mut h, r#"{"tag_name":"v99.0.0.1"}"#);
+        make_release_assets(&assets);
+        let hook_path = h.state.data_dir.join("fake-hook");
+        std::fs::write(&hook_path, b"#!/bin/sh\nexit 0\n").unwrap();
+        assert!(hook_path.is_file());
+        let exited = Arc::new(AtomicBool::new(false));
+        let flag = exited.clone();
+        let cfg = crate::update::UpdateConfig {
+            hook_path,
+            ..h.state.update.config.clone()
+        };
+        h.state.update = Arc::new(crate::update::UpdateState::with_exit_hook(
+            cfg,
+            Box::new(move || flag.store(true, Ordering::SeqCst)),
+        ));
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/update/apply")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        assert!(h.state.data_dir.join("update/tag").is_file());
+        for _ in 0..40 {
+            if exited.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("exit hook never fired");
     }
 }
