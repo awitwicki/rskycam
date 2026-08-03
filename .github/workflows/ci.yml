@@ -70,5 +70,6 @@ jobs:
         run: |
           sudo useradd --system rskycam
           sudo install -m 755 /dev/null /usr/local/bin/rskycam
+          sudo install -m 755 /dev/null /usr/local/bin/rskycam-apply-update
           sudo mkdir -p /var/lib/rskycam
           sudo systemd-analyze verify installer/rskycam.service

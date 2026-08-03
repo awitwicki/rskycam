@@ -63,6 +63,9 @@ main() {
   systemctl stop rskycam 2>/dev/null || true
 
   install -m 755 "$tmp/rskycam" "$BIN"
+  if [ -f "$tmp/apply-update.sh" ]; then
+    install -m 755 "$tmp/apply-update.sh" /usr/local/bin/rskycam-apply-update
+  fi
   install -d -m 755 "$DOC_DIR"
   install -m 644 "$tmp/LICENSE" "$tmp/ASI-LICENSE" "$DOC_DIR/"
   install -m 644 "$tmp/99-asi.rules" /etc/udev/rules.d/99-asi.rules
