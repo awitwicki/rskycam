@@ -8,12 +8,18 @@ mod processing;
 mod sensors;
 mod settings;
 mod system;
+mod version;
 mod web;
 
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("rskycam {}", version::full());
+        return Ok(());
+    }
+
     let data_dir = std::path::PathBuf::from(
         std::env::var("RSKYCAM_DATA").unwrap_or_else(|_| "/var/lib/rskycam".into()),
     );

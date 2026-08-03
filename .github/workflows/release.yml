@@ -43,6 +43,8 @@ jobs:
           tool: cargo-zigbuild
 
       - name: Cross-compile aarch64 (glibc 2.36, embedded UI)
+        env:
+          RSKYCAM_BUILD: ${{ github.run_number }}
         run: cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu.2.36 --features embed-ui
 
       - name: Package tarball
