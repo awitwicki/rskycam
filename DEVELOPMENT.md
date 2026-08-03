@@ -23,6 +23,32 @@ binary, udev rule and service, restarts, and never touches
 
 **Logs:** `journalctl -u rskycam -f` (journald handles rotation).
 
+## Self-update
+
+The sidebar's Update pill (next to the GitHub link) performs a staged
+self-update:
+
+1. The service (unprivileged) downloads the newest release tarball and
+   its sha256 into `/var/lib/rskycam/update/`, verifies the checksum,
+   writes the release tag, replies 202 and exits.
+2. systemd (`Restart=always`) restarts the unit.
+   `ExecStartPre=+/usr/local/bin/rskycam-apply-update` runs as root: it
+   re-fetches the release checksum from GitHub itself, re-verifies the
+   staged tarball, smoke-tests the binary (`--version`), installs it to
+   `/usr/local/bin/rskycam` (previous kept as `rskycam.old`) and removes
+   the staging dir. Every failure discards the staged files and never
+   blocks service start.
+
+Rollback after a bad update:
+
+    sudo mv /usr/local/bin/rskycam.old /usr/local/bin/rskycam
+    sudo systemctl restart rskycam
+
+Version scheme: CI builds embed `X.Y.Z.<run_number>` (`RSKYCAM_BUILD`
+set by the release workflow at compile time); local builds report
+`X.Y.Z-dev`. `rskycam --version` prints it; `/api/status` carries it to
+the UI.
+
 **Uninstall:**
 
 ```bash
