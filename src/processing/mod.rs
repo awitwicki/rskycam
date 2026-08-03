@@ -292,6 +292,32 @@ fn finalize_night(
     }
 }
 
+/// What a dawn-check tick should do with the currently-open night, given
+/// whether it's still night and whether the date bucket has moved on.
+///
+/// `None` means the night is still running: do nothing. `Some(close)`
+/// means finalize now; `close` says whether to also mark the date as
+/// closed against later frames (`last_finalized`).
+///
+/// Only a genuine date change (`date_moved`) closes the date. A
+/// same-day refresh (`now_night == false`, date unchanged — the
+/// "keep today's day timelapse fresh" tick that fires continuously
+/// all day) must still finalize, but must NOT close the date: `night_date`
+/// and `is_night` share the same civil-twilight threshold, so at a true
+/// dawn transition both flip together and `date_moved` is reliably true.
+/// Closing on every same-day refresh instead poisons `last_finalized` to
+/// today's date after the first one — every later frame for the
+/// still-open night (including the whole night's own frames) then gets
+/// silently rejected until the calendar date rolls over, so the night's
+/// keogram/star trails/timelapse never get finalized at dawn.
+fn tick_action(now_night: bool, date_moved: bool) -> Option<bool> {
+    if now_night && !date_moved {
+        None
+    } else {
+        Some(date_moved)
+    }
+}
+
 pub fn spawn_processing(
     cfg: Arc<RwLock<ConfigFile>>,
     data_dir: PathBuf,
@@ -460,15 +486,17 @@ pub fn spawn_processing(
                         loc.latitude_deg,
                         loc.longitude_deg,
                     ) != st.date;
-                    if now_night && !date_moved {
+                    let Some(close_date) = tick_action(now_night, date_moved) else {
                         continue; // night still running
-                    }
+                    };
                     let date = st.date;
                     tracing::info!(
-                        "dawn tick finalizing {date} (now_night={now_night}, date_moved={date_moved})"
+                        "dawn tick finalizing {date} (now_night={now_night}, date_moved={date_moved}, closing={close_date})"
                     );
                     state = None;
-                    last_finalized = Some(date);
+                    if close_date {
+                        last_finalized = Some(date);
+                    }
                     let dd = data_dir.clone();
                     let ffmpeg = pc.ffmpeg.clone();
                     if let Err(e) = tokio::task::spawn_blocking(move || {
@@ -498,6 +526,24 @@ mod tests {
 
     fn fixture_ffmpeg() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-ffmpeg")
+    }
+
+    #[test]
+    fn tick_action_only_closes_the_date_on_a_genuine_transition() {
+        // Still genuinely night, same date: nothing to do.
+        assert_eq!(tick_action(true, false), None);
+        // A same-day "keep the day timelapse fresh" refresh: finalize,
+        // but do NOT close the date — this is the regression case (a
+        // whole night's keogram/star trails/timelapse silently never
+        // finalized because a routine daytime refresh poisoned
+        // last_finalized against the still-open night).
+        assert_eq!(tick_action(false, false), Some(false));
+        // A genuine dawn transition: finalize AND close.
+        assert_eq!(tick_action(false, true), Some(true));
+        // Edge case (e.g. the polar-night noon fallback in night_date):
+        // the date moved while is_night still reports true — finalize
+        // and close, since the bucket genuinely changed.
+        assert_eq!(tick_action(true, true), Some(true));
     }
 
     // Matches Settings::default().location — see night_ts/day_ts below.
