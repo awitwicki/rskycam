@@ -8,6 +8,7 @@ mod processing;
 mod sensors;
 mod settings;
 mod system;
+mod update;
 mod version;
 mod web;
 
@@ -76,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
         data_dir.clone(),
         Some(processing.frames.clone()),
     );
+    let update = Arc::new(update::UpdateState::new(update::UpdateConfig::default()));
     let state = web::AppState {
         cfg,
         store,
@@ -89,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
         key,
         data_dir,
         processing: processing.clone(),
+        update,
     };
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));

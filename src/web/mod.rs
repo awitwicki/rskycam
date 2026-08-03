@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth_layer;
 pub mod nights;
+pub mod update;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,6 +29,7 @@ pub struct AppState {
     pub key: Key,
     pub data_dir: PathBuf,
     pub processing: crate::processing::ProcessingHandle,
+    pub update: Arc<crate::update::UpdateState>,
 }
 
 impl FromRef<AppState> for Key {
@@ -202,6 +204,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/darks", get(api::get_darks).delete(api::delete_darks))
         .route("/api/darks/capture", post(api::start_darks_capture))
+        .route("/api/update", get(update::get_update))
         .route("/api/focus", post(api::post_focus))
         .route("/api/focus.jpg", get(api::focus_jpg))
         .route("/api/focus/star.png", get(api::focus_star_png))
@@ -354,6 +357,15 @@ pub(crate) mod testing {
         let (darks_progress_tx, darks_progress) = watch::channel(None);
         let (focus_tx, focus) = watch::channel(None);
         let focus_shared = Arc::new(crate::capture::focus::FocusShared::new());
+        let update = Arc::new(crate::update::UpdateState::with_exit_hook(
+            crate::update::UpdateConfig {
+                // nonexistent binary: checks fail fast in tests that don't care
+                curl: dir.path().join("no-curl"),
+                api_url: "http://unused.invalid".into(),
+                download_base: "http://unused.invalid".into(),
+            },
+            Box::new(|| {}), // never exit the test process
+        ));
         let processing = crate::processing::spawn_processing(
             // note: reuse the same Arc<RwLock<ConfigFile>> that goes into AppState
             cfg_arc.clone(),
@@ -377,6 +389,7 @@ pub(crate) mod testing {
             key: Key::generate(),
             data_dir: dir.path().to_path_buf(),
             processing,
+            update,
         };
         Harness {
             state,

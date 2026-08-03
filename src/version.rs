@@ -10,7 +10,6 @@ pub fn full() -> &'static str {
 
 /// Parse `v?X.Y.Z` or `v?X.Y.Z.N` into 4 numbers; a missing 4th part
 /// sorts below any explicit build number (legacy `v0.5.0` < `v0.5.0.1`).
-#[allow(dead_code)]
 fn parse(v: &str) -> Option<[i64; 4]> {
     let v = v.strip_prefix('v').unwrap_or(v);
     let parts: Vec<&str> = v.split('.').collect();
@@ -28,7 +27,6 @@ fn parse(v: &str) -> Option<[i64; 4]> {
 /// `current`. An unparseable current (a `-dev` build) counts as older
 /// than any release, so dev Pis are offered updates; an unparseable
 /// latest never triggers an update.
-#[allow(dead_code)]
 pub fn update_available(current: &str, latest: &str) -> bool {
     match (parse(current), parse(latest)) {
         (_, None) => false,

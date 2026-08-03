@@ -39,6 +39,7 @@ pub struct FocusInfo {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
+    pub version: String,
     pub capture: CaptureStatus,
     pub sensor: SensorStatus,
     pub system: SystemStatus,
@@ -77,6 +78,7 @@ async fn build_status(state: &AppState) -> Status {
     .await
     .expect("status readers are panic-free by design");
     Status {
+        version: crate::version::full().to_string(),
         capture,
         sensor,
         system,
@@ -557,6 +559,7 @@ mod tests {
         let app = crate::web::router(h.state.clone());
         let cookie = login_cookie(&app).await;
         let v = get_json(&app, &cookie, "/api/status").await;
+        assert!(!v["version"].as_str().unwrap().is_empty());
         assert_eq!(v["capture"]["state"], "idle");
         assert!(v["astro"]["sunAltDeg"].is_number());
         assert!(v["astro"]["moonPhasePct"].is_number());
