@@ -318,6 +318,22 @@ fn tick_action(now_night: bool, date_moved: bool) -> Option<bool> {
     }
 }
 
+/// How often a same-day refresh may re-encode the (growing) day
+/// timelapse. Re-encoding the whole video from scratch on every
+/// `dawn_check` tick is O(frames²) over a day and pegs the CPU; a
+/// genuine night-closing transition always proceeds immediately
+/// regardless of this throttle.
+const DAY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Whether enough time has passed since the last same-day refresh to
+/// do another one.
+fn day_refresh_due(last_day_refresh: Option<std::time::Instant>) -> bool {
+    match last_day_refresh {
+        Some(t) => t.elapsed() >= DAY_REFRESH_INTERVAL,
+        None => true,
+    }
+}
+
 pub fn spawn_processing(
     cfg: Arc<RwLock<ConfigFile>>,
     data_dir: PathBuf,
@@ -329,6 +345,7 @@ pub fn spawn_processing(
     tokio::spawn(async move {
         let mut state: Option<NightState> = None;
         let mut last_finalized: Option<chrono::NaiveDate> = None;
+        let mut last_day_refresh: Option<std::time::Instant> = None;
         let mut pending_rebuild: Option<tokio::task::JoinHandle<NightState>> = None;
         let mut tick = tokio::time::interval(pc.dawn_check);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -489,6 +506,12 @@ pub fn spawn_processing(
                     let Some(close_date) = tick_action(now_night, date_moved) else {
                         continue; // night still running
                     };
+                    if !close_date {
+                        if !day_refresh_due(last_day_refresh) {
+                            continue; // refreshed recently enough
+                        }
+                        last_day_refresh = Some(std::time::Instant::now());
+                    }
                     let date = st.date;
                     tracing::info!(
                         "dawn tick finalizing {date} (now_night={now_night}, date_moved={date_moved}, closing={close_date})"
@@ -496,6 +519,7 @@ pub fn spawn_processing(
                     state = None;
                     if close_date {
                         last_finalized = Some(date);
+                        last_day_refresh = None;
                     }
                     let dd = data_dir.clone();
                     let ffmpeg = pc.ffmpeg.clone();
@@ -544,6 +568,19 @@ mod tests {
         // the date moved while is_night still reports true — finalize
         // and close, since the bucket genuinely changed.
         assert_eq!(tick_action(true, true), Some(true));
+    }
+
+    #[test]
+    fn day_refresh_due_examples() {
+        assert!(day_refresh_due(None), "never refreshed yet: due");
+        let just_now = std::time::Instant::now();
+        assert!(
+            !day_refresh_due(Some(just_now)),
+            "refreshed moments ago: not due"
+        );
+        let long_ago =
+            std::time::Instant::now() - DAY_REFRESH_INTERVAL - std::time::Duration::from_secs(1);
+        assert!(day_refresh_due(Some(long_ago)), "interval elapsed: due");
     }
 
     // Matches Settings::default().location — see night_ts/day_ts below.
