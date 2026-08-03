@@ -11,7 +11,8 @@
 set -u
 
 REPO="awitwicki/rskycam"
-UPDATE_DIR="/var/lib/rskycam/update"
+DATA_DIR="${RSKYCAM_DATA:-/var/lib/rskycam}"
+UPDATE_DIR="$DATA_DIR/update"
 TARBALL="$UPDATE_DIR/rskycam-aarch64.tar.gz"
 TAG_FILE="$UPDATE_DIR/tag"
 BIN="/usr/local/bin/rskycam"
@@ -31,7 +32,7 @@ tag=$(cat "$TAG_FILE")
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || discard "malformed tag '$tag'"
 
 sha_url="https://github.com/$REPO/releases/download/$tag/rskycam-aarch64.tar.gz.sha256"
-sha=$(curl -fsSL --max-time 15 "$sha_url") || discard "cannot fetch checksum (offline?)"
+sha=$(curl -fsSL --proto '=https' --proto-redir '=https' --max-time 15 "$sha_url") || discard "cannot fetch checksum (offline?)"
 expected=$(echo "$sha" | awk '{print $1}')
 
 # Copy the staged tarball into our root-owned tmp dir and never read
@@ -41,7 +42,13 @@ expected=$(echo "$sha" | awk '{print $1}')
 # compromised service user swaps the file between the checksum check and
 # the extraction. Hashing and extracting the same already-copied,
 # root-owned file closes that window.
-tmp=$(mktemp -d)
+#
+# Placed under $DATA_DIR rather than the system /tmp: this hook runs
+# outside the systemd sandbox (the "+" prefix), so PrivateTmp= does not
+# apply to it, and a hardened host could mount /tmp noexec — $DATA_DIR
+# is guaranteed exec-able since the app itself runs its binary from
+# alongside it on the same filesystem.
+tmp=$(mktemp -d -p "$DATA_DIR")
 trap 'rm -rf "$tmp"' EXIT
 cp "$TARBALL" "$tmp/rskycam-aarch64.tar.gz" || discard "cannot copy staged tarball"
 actual=$(sha256sum "$tmp/rskycam-aarch64.tar.gz" | awk '{print $1}')

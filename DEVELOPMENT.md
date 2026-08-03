@@ -39,6 +39,17 @@ self-update:
    the staging dir. Every failure discards the staged files and never
    blocks service start.
 
+Existing installs must re-run the installer once (`curl ... | sudo
+bash`) before the Update pill will work — it needs the new systemd unit
+(`Restart=always`) and the root hook; without them, `POST
+/api/update/apply` now returns 503 rather than leaving the service
+unable to restart.
+
+Self-update replaces only the `rskycam` binary. `rskycam.service` and
+`rskycam-apply-update` do not update themselves — any future change to
+the systemd unit or the hook script requires a manual installer re-run
+on every Pi.
+
 Rollback after a bad update:
 
     sudo mv /usr/local/bin/rskycam.old /usr/local/bin/rskycam
@@ -54,6 +65,7 @@ the UI.
 ```bash
 sudo systemctl disable --now rskycam
 sudo rm /etc/systemd/system/rskycam.service /etc/udev/rules.d/99-asi.rules /usr/local/bin/rskycam
+sudo rm -f /usr/local/bin/rskycam-apply-update /usr/local/bin/rskycam.old
 sudo systemctl daemon-reload
 sudo udevadm control --reload-rules
 sudo rm -r /usr/local/share/doc/rskycam

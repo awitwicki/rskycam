@@ -42,8 +42,8 @@ main() {
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
   echo "-> downloading $url"
-  curl -fsSL -o "$tmp/$ASSET" "$url"
-  curl -fsSL -o "$tmp/$ASSET.sha256" "$url.sha256"
+  curl -fsSL --proto '=https' --proto-redir '=https' -o "$tmp/$ASSET" "$url"
+  curl -fsSL --proto '=https' --proto-redir '=https' -o "$tmp/$ASSET.sha256" "$url.sha256"
   (cd "$tmp" && sha256sum -c "$ASSET.sha256" >/dev/null) || die "checksum mismatch"
   tar -xzf "$tmp/$ASSET" -C "$tmp"
 

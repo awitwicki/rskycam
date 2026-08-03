@@ -12,8 +12,12 @@ Environment=RSKYCAM_DATA=/var/lib/rskycam
 Environment=RUST_LOG=rskycam=info
 # Applies a staged self-update (see /usr/local/bin/rskycam-apply-update)
 # before each start. The "+" prefix runs it as root with the sandboxing
-# below not applied, so it may replace the binary in /usr/local/bin.
-ExecStartPre=+/usr/local/bin/rskycam-apply-update
+# below not applied, so it may replace the binary in /usr/local/bin. The
+# "-" prefix makes a failing or missing hook non-fatal to the unit start
+# (defense in depth: the hook script already guarantees it never blocks
+# service start by always exiting 0, but this covers the hook binary
+# itself being absent, e.g. mid-installer-upgrade).
+ExecStartPre=-+/usr/local/bin/rskycam-apply-update
 ExecStart=/usr/local/bin/rskycam
 Restart=always
 RestartSec=3
