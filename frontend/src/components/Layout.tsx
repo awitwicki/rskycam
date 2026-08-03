@@ -1,6 +1,8 @@
 import { Camera, Compass, Focus, Images, LogOut, ScrollText, Settings } from 'lucide-react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
+import { useUpdateInfo } from '../hooks/useUpdateInfo'
+import UpdateWidget from './UpdateWidget'
 
 const REPO_URL = 'https://github.com/awitwicki/rskycam'
 
@@ -33,6 +35,7 @@ function GithubIcon({ size }: { size: number }) {
 
 export default function Layout() {
   const { logout } = useAuth()
+  const update = useUpdateInfo()
   return (
     <div className="min-h-screen md:flex md:h-screen md:overflow-hidden">
       <aside className="hidden border-r border-line bg-panel px-4 py-6 md:flex md:w-52 md:flex-col md:overflow-y-auto">
@@ -51,6 +54,7 @@ export default function Layout() {
             className="flex items-center gap-2 px-3 py-2 text-sm text-fgdim hover:text-fg">
             <GithubIcon size={16} /> GitHub
           </a>
+          <UpdateWidget />
           <button onClick={logout}
             className="flex items-center gap-2 px-3 py-2 text-sm text-fgdim hover:text-fg">
             <LogOut size={16} /> Log out
@@ -62,8 +66,12 @@ export default function Layout() {
         <span className="font-mono text-accent">✦ rskycam</span>
         <div className="flex items-center gap-3">
           <a href={REPO_URL} target="_blank" rel="noopener noreferrer" aria-label="GitHub repository"
-            className="text-fgdim hover:text-fg">
+            className="relative text-fgdim hover:text-fg">
             <GithubIcon size={18} />
+            {update?.updateAvailable && (
+              <span data-testid="update-dot"
+                className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-accent" />
+            )}
           </a>
           <button onClick={logout} aria-label="Log out" className="text-fgdim hover:text-fg">
             <LogOut size={18} />
