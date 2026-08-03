@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { getApi } from '../api/client'
+import { HttpError } from '../api/realApi'
 import { useUpdateInfo } from '../hooks/useUpdateInfo'
 
 type Phase = 'idle' | 'confirm' | 'working' | 'done' | 'failed'
@@ -10,6 +11,7 @@ export default function UpdateWidget() {
   const info = useUpdateInfo()
   const [phase, setPhase] = useState<Phase>('idle')
   const [newVersion, setNewVersion] = useState<string | null>(null)
+  const [failureMessage, setFailureMessage] = useState<string | null>(null)
 
   if (!info) return null
 
@@ -18,9 +20,19 @@ export default function UpdateWidget() {
     setPhase('working')
     try {
       await getApi().applyUpdate()
-    } catch {
-      // The server exits right after the 202 — a dropped connection here
-      // usually means the restart is already underway. Keep polling.
+    } catch (e) {
+      if (e instanceof HttpError) {
+        // A real HTTP-level rejection (409 no newer release, 502 staging
+        // failed, 503 hook missing) — the server never restarted, so
+        // there's nothing to poll for. Surface its message immediately
+        // instead of waiting out the full timeout.
+        setFailureMessage(e.body || `Update rejected (HTTP ${e.status})`)
+        setPhase('failed')
+        return
+      }
+      // A network-level failure (connection dropped, not an HTTP
+      // response) — the server likely already exited to apply the
+      // update. Keep polling.
     }
     const deadline = Date.now() + 120_000
     while (Date.now() < deadline) {
@@ -43,7 +55,10 @@ export default function UpdateWidget() {
     <>
       {info.updateAvailable && info.latest ? (
         <button
-          onClick={() => setPhase('confirm')}
+          onClick={() => {
+            setFailureMessage(null) // a retry shouldn't show a stale failure
+            setPhase('confirm')
+          }}
           className="flex items-center gap-2 rounded-lg px-3 py-1 text-left text-xs text-accent hover:bg-panel2"
         >
           <span className="h-1.5 w-1.5 rounded-full bg-accent" />
@@ -94,8 +109,12 @@ export default function UpdateWidget() {
             {phase === 'failed' && (
               <>
                 <div className="mb-4 text-sm">
-                  The service did not come back with a new version within 2
-                  minutes. Check <span className="font-mono">journalctl -u rskycam</span>.
+                  {failureMessage ?? (
+                    <>
+                      The service did not come back with a new version within 2
+                      minutes. Check <span className="font-mono">journalctl -u rskycam</span>.
+                    </>
+                  )}
                 </div>
                 <div className="flex justify-end">
                   <button onClick={() => setPhase('idle')}

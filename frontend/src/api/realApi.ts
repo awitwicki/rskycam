@@ -7,6 +7,21 @@ import type {
 const AUTH_FLAG = 'rskycam.auth'
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
 
+/** An HTTP-level rejection (the server responded, just not with 2xx) —
+ * distinct from a network-level failure (fetch rejects, no response at
+ * all). Callers that treat "the connection dropped" as "the server is
+ * mid-restart" need this distinction (see UpdateWidget's applyUpdate). */
+export class HttpError extends Error {
+  status: number
+  body: string
+
+  constructor(status: number, body: string) {
+    super(`HTTP ${status}: ${body}`)
+    this.status = status
+    this.body = body
+  }
+}
+
 /** Fetch wrapper: 401 anywhere ⇒ drop the session and notify the app. */
 async function http(path: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(path, init)
@@ -15,7 +30,10 @@ async function http(path: string, init?: RequestInit): Promise<Response> {
     window.dispatchEvent(new Event('rskycam:unauthorized'))
     throw new Error('unauthorized')
   }
-  if (!res.ok) throw new Error(`${init?.method ?? 'GET'} ${path} failed: ${res.status}`)
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new HttpError(res.status, body)
+  }
   return res
 }
 

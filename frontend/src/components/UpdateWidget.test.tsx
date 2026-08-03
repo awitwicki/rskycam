@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import UpdateWidget from './UpdateWidget'
 import { setApi } from '../api/client'
 import { MockApi } from '../api/mock/mockApi'
+import { HttpError } from '../api/realApi'
 import { _resetUpdateInfoForTests } from '../hooks/useUpdateInfo'
 import type { Status, UpdateInfo } from '../api/types'
 
@@ -68,5 +69,28 @@ describe('UpdateWidget', () => {
     // vi.waitFor, not testing-library's waitFor: the latter polls via a
     // real setInterval fallback, which is also frozen under fake timers.
     await vi.waitFor(() => expect(screen.getByText(/Updated to v0.5.0.9/)).toBeInTheDocument())
+  })
+
+  it('shows the server-rejected message immediately on an HTTP-level apply failure', async () => {
+    const api = apiWith(
+      { current: '0.5.0.7', latest: 'v0.5.0.9', updateAvailable: true, error: null },
+      ['0.5.0.7'],
+    )
+    // A real HTTP rejection (e.g. 409 "no newer release known", or 503 if
+    // the self-update hook isn't installed) — the server never restarted,
+    // so this path must not poll and must not wait out the 2-minute
+    // timeout: no fake-timer advancement needed here at all.
+    api.applyUpdate = vi.fn(async () => {
+      throw new HttpError(409, 'no newer release known')
+    })
+    setApi(api)
+    const user = userEvent.setup()
+    render(<UpdateWidget />)
+
+    await user.click(await screen.findByText(/Update → v0.5.0.9/))
+    await user.click(screen.getByRole('button', { name: 'Update' }))
+
+    expect(api.applyUpdate).toHaveBeenCalledOnce()
+    expect(await screen.findByText('no newer release known')).toBeInTheDocument()
   })
 })

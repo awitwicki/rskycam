@@ -18,7 +18,13 @@ export function useUpdateInfo(): UpdateInfo | null {
         cache = i
         if (alive) setInfo(i)
       })
-      .catch(() => {}) // no version line is fine; never crash the layout
+      .catch(() => {
+        // No version line is fine; never crash the layout. But don't leave
+        // `inflight` pointing at a dead, rejected promise forever — that
+        // would make every later mount resolve to the same rejection
+        // without ever retrying the fetch.
+        inflight = null
+      })
     return () => {
       alive = false
     }
