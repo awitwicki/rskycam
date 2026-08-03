@@ -1,6 +1,6 @@
 import type {
   ApiEvent, DarksLibrary, LightgraphData, LogsResponse, NightDetail, NightSummary,
-  OverlayGeometry, OverlayRequest, Settings, Status,
+  OverlayGeometry, OverlayRequest, Settings, Status, UpdateInfo,
 } from './types'
 import { MockApi } from './mock/mockApi'
 import { RealApi } from './realApi'
@@ -19,6 +19,8 @@ export interface ApiClient {
   getSettings(): Promise<Settings>
   putSettings(s: Settings): Promise<void>
   changePassword(oldPassword: string, newPassword: string): Promise<boolean>
+  getUpdate(): Promise<UpdateInfo>
+  applyUpdate(): Promise<void>
   getNights(): Promise<NightSummary[]>
   getNight(date: string): Promise<NightDetail>
   rebuildNight(date: string): Promise<void>

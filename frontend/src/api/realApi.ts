@@ -1,7 +1,7 @@
 import type { ApiClient } from './client'
 import type {
   ApiEvent, DarksLibrary, FocusMeta, FrameMeta, LightgraphData, LogsResponse, NightDetail,
-  NightSummary, OverlayGeometry, OverlayRequest, Settings, Status,
+  NightSummary, OverlayGeometry, OverlayRequest, Settings, Status, UpdateInfo,
 } from './types'
 
 const AUTH_FLAG = 'rskycam.auth'
@@ -45,6 +45,14 @@ export class RealApi implements ApiClient {
       method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ oldPassword, newPassword }),
     })
     return res.ok
+  }
+
+  async getUpdate(): Promise<UpdateInfo> {
+    return http('/api/update').then(json<UpdateInfo>)
+  }
+
+  async applyUpdate(): Promise<void> {
+    await http('/api/update/apply', { method: 'POST' })
   }
 
   latestImageUrl(opts?: { raw?: boolean }): string {

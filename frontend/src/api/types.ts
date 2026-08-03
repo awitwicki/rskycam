@@ -93,6 +93,7 @@ export interface DarksLibrary {
 }
 
 export interface Status {
+  version: string
   capture: CaptureStatus
   sensor: SensorStatus
   system: SystemStatus
@@ -100,6 +101,14 @@ export interface Status {
   camera: CameraCaps | null
   darksProgress: DarksProgress | null
   focus: FocusInfo
+}
+
+/** GET /api/update — current build vs newest GitHub release. */
+export interface UpdateInfo {
+  current: string
+  latest: string | null
+  updateAvailable: boolean
+  error: string | null
 }
 
 /** Sun altitude sampled across a 24h window (local noon → noon). */

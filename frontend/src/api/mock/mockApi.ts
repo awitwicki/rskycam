@@ -2,7 +2,7 @@ import type { ApiClient } from '../client'
 import type {
   ApiEvent, ArtifactState, DarkEntry, DarksLibrary, FocusMeta, FrameInfo, FrameMeta,
   LightgraphData, LensCalibration, LogsResponse, NightDetail, NightSummary, OverlayGeometry,
-  OverlayRequest, Settings, Status, TextFieldKind,
+  OverlayRequest, Settings, Status, TextFieldKind, UpdateInfo,
 } from '../types'
 import {
   altitudeOf, moonEquatorial, moonIllumination, sunEquatorial,
@@ -142,6 +142,12 @@ export class MockApi implements ApiClient {
     return true
   }
 
+  async getUpdate(): Promise<UpdateInfo> {
+    return { current: '0.5.0-mock', latest: 'v0.9.9.9', updateAvailable: true, error: null }
+  }
+
+  async applyUpdate(): Promise<void> {}
+
   // ── live status ──
   private frameMeta(time: Date): FrameMeta {
     return { timestamp: time.toISOString(), exposureUs: 30_000_000, gain: 250, isNight: true }
@@ -201,6 +207,7 @@ export class MockApi implements ApiClient {
     this.cpuTemp = Math.min(72, Math.max(42, this.cpuTemp + (Math.random() - 0.5) * 1.5))
     this.cpuLoad = Math.min(4, Math.max(0.2, this.cpuLoad + (Math.random() - 0.5) * 0.3))
     return {
+      version: '0.5.0-mock',
       astro: this.astroNow(),
       capture: {
         state: this.focusEnabled ? 'focusing' : 'capturing',

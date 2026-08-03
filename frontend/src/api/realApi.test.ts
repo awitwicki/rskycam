@@ -73,4 +73,18 @@ describe('RealApi', () => {
     expect(api.focusImageUrl()).toContain('/api/focus.jpg?ts=')
     expect(api.focusStarUrl()).toContain('/api/focus/star.png?ts=')
   })
+
+  it('getUpdate parses the update info and applyUpdate posts', async () => {
+    const api = new RealApi()
+    fetchMock.mockResolvedValueOnce(
+      okJson({ current: '0.5.0.7', latest: 'v0.5.0.9', updateAvailable: true, error: null }))
+    const info = await api.getUpdate()
+    expect(info.updateAvailable).toBe(true)
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/update')
+
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 202 }))
+    await api.applyUpdate()
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/update/apply')
+    expect((fetchMock.mock.calls[1][1] as RequestInit).method).toBe('POST')
+  })
 })

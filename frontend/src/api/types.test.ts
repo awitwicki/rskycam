@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import type { ApiEvent, ArtifactState, CaptureState, FocusMeta, OverlayGeometry, Settings, Status } from './types'
+import type {
+  ApiEvent, ArtifactState, CaptureState, FocusMeta, OverlayGeometry, Settings, Status, UpdateInfo,
+} from './types'
 
 describe('api contract', () => {
   it('accepts a fully-populated Status', () => {
     const s: Status = {
+      version: '0.5.0.7',
       capture: {
         state: 'capturing',
         lastFrame: { timestamp: '2026-07-14T01:00:00Z', exposureUs: 30_000_000, gain: 250, isNight: true },
@@ -26,6 +29,13 @@ describe('api contract', () => {
       { state: 'not_detected', reading: null },
     ]
     expect(offStates.every((x) => x.reading === null)).toBe(true)
+  })
+
+  it('accepts UpdateInfo in both states', () => {
+    const yes: UpdateInfo = { current: '0.5.0.7', latest: 'v0.5.0.9', updateAvailable: true, error: null }
+    const err: UpdateInfo = { current: '0.5.0-dev', latest: null, updateAvailable: false, error: 'offline' }
+    expect(yes.updateAvailable).toBe(true)
+    expect(err.latest).toBeNull()
   })
 
   it('accepts every ArtifactState variant', () => {
