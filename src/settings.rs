@@ -28,8 +28,10 @@ pub struct CameraSettings {
     pub manual_gain: f64,
     // serde defaults let a config.toml written before these fields existed
     // load without resetting the rest of the settings.
+    /// 0 = continuous shooting: capture again immediately, no sleep.
     #[serde(default = "default_interval_sec_day")]
     pub interval_sec_day: u64,
+    /// 0 = continuous shooting: capture again immediately, no sleep.
     #[serde(default = "default_interval_sec_night")]
     pub interval_sec_night: u64,
     pub capture_during_day: bool,
@@ -367,8 +369,6 @@ impl Settings {
         c.manual_exposure_us = c
             .manual_exposure_us
             .clamp(c.exposure_us_min, c.exposure_us_max);
-        c.interval_sec_day = c.interval_sec_day.max(1);
-        c.interval_sec_night = c.interval_sec_night.max(1);
         c.target_brightness = c.target_brightness.clamp(1.0, 254.0);
         c.capture_width = c.capture_width.max(8);
         c.capture_height = c.capture_height.max(2);
@@ -773,14 +773,34 @@ mod tests {
     }
 
     #[test]
+    fn interval_zero_survives_sanitize_and_round_trips() {
+        // 0 = continuous shooting: sanitize must not clamp it away, and it
+        // must survive a TOML save/load cycle.
+        let mut s = Settings::default();
+        s.camera.interval_sec_day = 0;
+        s.camera.interval_sec_night = 0;
+        s.sanitize();
+        assert_eq!(s.camera.interval_sec_day, 0);
+        assert_eq!(s.camera.interval_sec_night, 0);
+
+        let dir = TempDir::new().unwrap();
+        let store = SettingsStore::new(dir.path());
+        let mut cfg = store.load_or_create("h").unwrap();
+        cfg.settings.camera.interval_sec_day = 0;
+        cfg.settings.camera.interval_sec_night = 0;
+        store.save(&cfg).unwrap();
+        let loaded = store.load_or_create("h").unwrap();
+        assert_eq!(loaded.settings.camera.interval_sec_day, 0);
+        assert_eq!(loaded.settings.camera.interval_sec_night, 0);
+    }
+
+    #[test]
     fn sanitize_clamps_out_of_range_fields() {
         let mut s = Settings::default();
         s.camera.manual_gain = 0.0; // below a sane floor
         s.camera.gain_min = -5.0;
         s.camera.gain_max = 0.5; // below gain_min after its own clamp
         s.camera.manual_exposure_us = 0;
-        s.camera.interval_sec_day = 0;
-        s.camera.interval_sec_night = 0;
         s.camera.target_brightness = 999.0;
         s.camera.capture_width = 0;
         s.camera.capture_height = 1;
@@ -799,8 +819,6 @@ mod tests {
             s.camera.manual_gain >= s.camera.gain_min && s.camera.manual_gain <= s.camera.gain_max
         );
         assert!(s.camera.manual_exposure_us >= 1);
-        assert!(s.camera.interval_sec_day >= 1);
-        assert!(s.camera.interval_sec_night >= 1);
         assert!(s.camera.target_brightness >= 1.0 && s.camera.target_brightness <= 254.0);
         assert!(s.camera.capture_width >= 8 && s.camera.capture_height >= 2);
         assert!(s.overlay.grid_opacity >= 0.0 && s.overlay.grid_opacity <= 1.0);

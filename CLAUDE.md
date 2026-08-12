@@ -61,6 +61,11 @@ and deferred items live there. Phases: 1 UI prototype ✅, 2 backend core ✅,
 3 processing (keogram/startrails/timelapse, overlay baking, retention),
 4 distribution (installer, udev, CI releases).
 
+Before finishing a branch (per `finishing-a-development-branch`), bump the
+`version` field in `Cargo.toml` — one bump per feature/task, not per commit.
+Patch for a fix or small change, minor for a completed feature.
+`frontend/package.json`'s version is unused and stays untouched.
+
 ## Deploy
 
 `scripts/deploy-pi.sh` — builds frontend, cross-compiles

@@ -684,10 +684,14 @@ where
                 } else {
                     s.camera.interval_sec_day
                 };
-                Duration::from_secs(interval.max(1))
+                Duration::from_secs(interval)
             } else {
                 METER_INTERVAL
             };
+            // A zero-duration `delay` (continuous mode) is always instantly
+            // ready; select!'s random branch order just means a pending
+            // darks-sweep or focus wake-up may land a capture or two late,
+            // never starved — recv/notified stay cancel-safe either way.
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
                 Some(()) = darks_cmd_rx.recv() => {
@@ -1729,5 +1733,45 @@ mod tests {
         .await
         .expect("normal capture did not resume");
         assert_eq!(ch.status.borrow().state, CaptureState::Capturing);
+    }
+
+    #[tokio::test]
+    async fn interval_zero_captures_back_to_back() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut cfg = test_cfg();
+        cfg.settings.camera.interval_sec_day = 0;
+        cfg.settings.camera.interval_sec_night = 0;
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(cfg));
+        let mut ch = spawn_capture(shared, dir.path().to_path_buf(), None);
+
+        // Wait out the camera probe + first capture, then time the next
+        // four frames. Continuous mode must not keep the old 1 s floor:
+        // four floored sleeps would take >= 4 s, mock captures take
+        // milliseconds. (watch coalescing can only make us wait for MORE
+        // captures per observed change, never fewer, so the bound holds.)
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                ch.latest.changed().await.unwrap();
+                if ch.latest.borrow().is_some() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("no first frame within 10s");
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            for _ in 0..4 {
+                ch.latest.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("no follow-up frames within 10s");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "4 follow-up frames took {:?}; continuous mode should be back-to-back",
+            started.elapsed()
+        );
     }
 }

@@ -168,9 +168,9 @@ export default function SettingsPage() {
               </select>
             </label>
             <NumberField label="Day capture interval" value={cam.intervalSecDay}
-              onChange={(v) => patch('camera', { intervalSecDay: v })} suffix="s" min={1} />
+              onChange={(v) => patch('camera', { intervalSecDay: v })} suffix="s" min={0} />
             <NumberField label="Night capture interval" value={cam.intervalSecNight}
-              onChange={(v) => patch('camera', { intervalSecNight: v })} suffix="s" min={1} />
+              onChange={(v) => patch('camera', { intervalSecNight: v })} suffix="s" min={0} />
             <label className="flex flex-col gap-1 text-sm">
               <span className="text-fgdim">Resolution</span>
               <select value={`${cam.captureWidth}x${cam.captureHeight}`}
@@ -187,6 +187,9 @@ export default function SettingsPage() {
               </select>
             </label>
           </div>
+          <p className="text-xs text-fgdim">
+            Interval 0 = continuous shooting: captures back-to-back with no gap, once exposure has settled.
+          </p>
           <p className="text-xs text-fgdim">
             {caps
               ? `Resolutions available on ${caps.model} (max ${caps.maxWidth}×${caps.maxHeight}).`
