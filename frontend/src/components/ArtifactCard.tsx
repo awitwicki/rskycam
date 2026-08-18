@@ -22,6 +22,7 @@ export default function ArtifactCard({ title, artifact, showSize, children }: {
       {artifact.state === 'ready' && children(artifact.url)}
       {artifact.state === 'generating' && <p className="animate-pulse text-sm text-warn">Generating…</p>}
       {artifact.state === 'error' && <p className="text-sm text-danger">Failed: {artifact.message}</p>}
+      {artifact.state === 'skipped' && <p className="text-sm text-fgdim">Skipped: {artifact.message}</p>}
       {artifact.state === 'pending' && <p className="text-sm text-fgdim">Not generated yet</p>}
       {artifact.state === 'disabled' && <p className="text-sm text-fgdim">Disabled in settings</p>}
     </Card>

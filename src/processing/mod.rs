@@ -19,7 +19,6 @@ pub struct NightFrame {
     pub date: NaiveDate,
     pub file: String,
     pub image: RgbImage,
-    pub mean: f64,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -66,12 +65,11 @@ fn frame_is_night(timestamp: chrono::DateTime<chrono::Utc>, location: &LocationS
 /// `file` is the frame's filename — its embedded timestamp becomes the
 /// keogram column's position on the hour scale. Daytime frames wash out the
 /// keogram (a night-sky visualization), so only night-classified frames are
-/// added to it; startrails keeps its own brightness-limit filter instead
-/// and is unaffected by `is_night_frame`.
+/// added to it; startrails keeps its own center-zone brightness-limit
+/// filter instead and is unaffected by `is_night_frame`.
 fn accumulate(
     st: &mut NightState,
     img: &RgbImage,
-    mean: f64,
     file: &str,
     is_night_frame: bool,
     p: &ProcessingSettings,
@@ -80,8 +78,7 @@ fn accumulate(
         st.keogram.add_frame(img, keogram::frame_time(file));
     }
     if p.startrails {
-        st.startrails
-            .add_frame(img, mean, p.startrails_brightness_limit);
+        st.startrails.add_frame(img, p.startrails_brightness_limit);
     }
 }
 
@@ -126,6 +123,15 @@ fn write_artifacts(dir: &Path, st: &NightState, p: &ProcessingSettings) {
                     Some(status::ArtifactProgress::Error { message: e })
                 }
             },
+            // Frames were seen but every one was rejected by the
+            // center-zone brightness gate: record why there is no
+            // artifact instead of silently leaving it absent.
+            None if st.startrails.skipped > 0 => Some(status::ArtifactProgress::Skipped {
+                message: format!(
+                    "all {} frames above the brightness limit ({})",
+                    st.startrails.skipped, p.startrails_brightness_limit
+                ),
+            }),
             None => None, // nothing decodable to render — clear any stale Generating flag
         };
     }
@@ -164,7 +170,6 @@ fn replay_night(
             continue; // pruned or unreadable frame — skip
         };
         let img = img.to_rgb8();
-        let mean = crate::camera::mean_brightness(&img);
         // A malformed/legacy timestamp defaults to "night" (include it) —
         // dropping it from the keogram entirely would be a worse regression
         // than an occasional misclassification.
@@ -173,8 +178,15 @@ fn replay_night(
             .parse::<chrono::DateTime<chrono::Utc>>()
             .map(|ts| frame_is_night(ts, location))
             .unwrap_or(true);
-        accumulate(&mut st, &img, mean, &fl.file, is_night_frame, p);
+        accumulate(&mut st, &img, &fl.file, is_night_frame, p);
         st.last_file = fl.file;
+    }
+    if p.startrails && st.startrails.used == 0 && st.startrails.skipped > 0 {
+        tracing::info!(
+            "startrails for {date}: all {} frames above the brightness limit ({})",
+            st.startrails.skipped,
+            p.startrails_brightness_limit
+        );
     }
     write_artifacts(&dir, &st, p);
     st
@@ -378,7 +390,7 @@ pub fn spawn_processing(
                             // Move the accumulators through spawn_blocking and back.
                             let joined = tokio::task::spawn_blocking(move || {
                                 let mut st = st;
-                                accumulate(&mut st, &frame.image, frame.mean, &frame.file, is_night_frame, &p);
+                                accumulate(&mut st, &frame.image, &frame.file, is_night_frame, &p);
                                 st.last_file = frame.file;
                                 write_artifacts(&night_dir(&dd, st.date), &st, &p);
                                 st
@@ -641,7 +653,6 @@ mod tests {
             date: chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
             file: file.to_string(),
             image: img,
-            mean: crate::camera::mean_brightness(&RgbImage::from_pixel(8, 6, Rgb(color))),
             timestamp: timestamp.parse().expect("valid test timestamp"),
         }
     }
@@ -755,6 +766,49 @@ mod tests {
                 .unwrap_or(false)
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn bright_night_records_skipped_startrails_instead_of_silence() {
+        // Every frame rejected by the center-zone brightness gate (e.g. a
+        // bright moonlit/overcast night): no startrails.jpg can exist, and
+        // the status file must say why rather than staying silent.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = test_cfg();
+        let date = crate::capture::night_date(chrono::Local::now(), LAT, LON).to_string();
+        let h = spawn_processing(
+            cfg,
+            dir.path().to_path_buf(),
+            ProcessingConfig {
+                ffmpeg: fixture_ffmpeg(),
+                dawn_check: std::time::Duration::from_secs(3600),
+            },
+        );
+        let night = dir.path().join("images").join(&date);
+        let f = seed_frame(
+            dir.path(),
+            &date,
+            "20260716-220000.jpg",
+            [200, 200, 200],
+            &night_ts(&date, 22, 0),
+        );
+        h.frames.send(f).await.unwrap();
+        wait_for("skipped startrails status", || {
+            matches!(
+                status::load(&night).startrails,
+                Some(status::ArtifactProgress::Skipped { .. })
+            )
+        })
+        .await;
+        assert!(!night.join("startrails.jpg").exists());
+        let Some(status::ArtifactProgress::Skipped { message }) = status::load(&night).startrails
+        else {
+            unreachable!("wait_for above");
+        };
+        assert!(
+            message.contains("brightness limit"),
+            "message must say why: {message}"
+        );
     }
 
     #[tokio::test]

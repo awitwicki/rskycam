@@ -9,7 +9,15 @@ pub const STATUS_FILE: &str = "processing.json";
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ArtifactProgress {
     Generating,
-    Error { message: String },
+    Error {
+        message: String,
+    },
+    /// Deliberately not produced — e.g. every frame rejected by the
+    /// startrails brightness gate. Distinct from an absent entry (which
+    /// reads as "pending") so the UI can say why there is no artifact.
+    Skipped {
+        message: String,
+    },
 }
 
 /// Per-night processing progress, persisted next to the artifacts so the
@@ -122,6 +130,22 @@ mod tests {
                 "iteration {i}: final file must be exactly one writer's payload, got {parsed:?}"
             );
         }
+    }
+
+    #[test]
+    fn skipped_state_wire_format() {
+        let st = NightProcessingStatus {
+            startrails: Some(ArtifactProgress::Skipped {
+                message: "all 3 frames above the brightness limit (35)".into(),
+            }),
+            ..Default::default()
+        };
+        let v: serde_json::Value = serde_json::to_value(&st).unwrap();
+        assert_eq!(v["startrails"]["state"], "skipped");
+        assert_eq!(
+            v["startrails"]["message"],
+            "all 3 frames above the brightness limit (35)"
+        );
     }
 
     #[test]

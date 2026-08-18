@@ -40,4 +40,14 @@ describe('ArtifactCard', () => {
     render(<ArtifactCard title="Keogram" artifact={{ state: 'disabled' }}>{img}</ArtifactCard>)
     expect(screen.getByText(/disabled in settings/i)).toBeInTheDocument()
   })
+
+  it('skipped: shows the reason', () => {
+    render(
+      <ArtifactCard title="Star trails"
+        artifact={{ state: 'skipped', message: 'all 1544 frames above the brightness limit (35)' }}>
+        {img}
+      </ArtifactCard>,
+    )
+    expect(screen.getByText(/all 1544 frames above the brightness limit/i)).toBeInTheDocument()
+  })
 })

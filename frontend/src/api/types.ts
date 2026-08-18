@@ -128,6 +128,7 @@ export type ArtifactState =
   | { state: 'ready'; url: string; sizeBytes: number }
   | { state: 'generating' }
   | { state: 'error'; message: string }
+  | { state: 'skipped'; message: string } // deliberately not produced; message says why
   | { state: 'pending' } // enabled in settings, not generated yet
   | { state: 'disabled' } // turned off in settings
 

@@ -8,6 +8,7 @@ function ArtifactBadge({ label, artifact }: { label: string; artifact: ArtifactS
     ready: 'text-ok border-ok/40',
     generating: 'text-warn border-warn/40',
     error: 'text-danger border-danger/40',
+    skipped: 'text-fgdim border-line',
     pending: 'text-fgdim border-accent/30',
     disabled: 'text-fgdim border-line',
   }[artifact.state]

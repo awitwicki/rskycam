@@ -581,7 +581,6 @@ where
                                             ),
                                             file,
                                             image: clean,
-                                            mean,
                                             timestamp: frame.timestamp,
                                         };
                                         if let Err(e) = tap.try_send(nf) {

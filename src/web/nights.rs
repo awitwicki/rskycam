@@ -30,6 +30,11 @@ pub enum ArtifactState {
     Error {
         message: String,
     },
+    // Deliberately not produced (e.g. every frame over the startrails
+    // brightness limit); message says why.
+    Skipped {
+        message: String,
+    },
     // Enabled in settings but not produced yet (generation lands in Phase 3).
     Pending,
     // Turned off in settings.
@@ -101,6 +106,11 @@ fn artifact(
             }
         }
         Some(crate::processing::status::ArtifactProgress::Generating) => ArtifactState::Generating,
+        Some(crate::processing::status::ArtifactProgress::Skipped { message }) => {
+            ArtifactState::Skipped {
+                message: message.clone(),
+            }
+        }
         None => match std::fs::metadata(night_dir.join(file)) {
             Ok(meta) => ArtifactState::Ready {
                 url: format!("/api/files/{date}/{file}"),
@@ -793,6 +803,42 @@ mod tests {
         assert_eq!(d["timelapseDay"]["state"], "error");
         assert_eq!(d["timelapseDay"]["message"], "no space left");
         assert_eq!(d["timelapseNight"]["state"], "pending"); // untouched by this status entry
+    }
+
+    #[tokio::test]
+    async fn processing_status_file_surfaces_skipped() {
+        let h = harness();
+        seed_night(&h.state.data_dir, "2026-07-14");
+        let night = h.state.data_dir.join("images").join("2026-07-14");
+        crate::processing::status::save(
+            &night,
+            &crate::processing::status::NightProcessingStatus {
+                startrails: Some(crate::processing::status::ArtifactProgress::Skipped {
+                    message: "all 5 frames above the brightness limit (35)".into(),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/nights/2026-07-14")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let d: serde_json::Value =
+            serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(d["startrails"]["state"], "skipped");
+        assert_eq!(
+            d["startrails"]["message"],
+            "all 5 frames above the brightness limit (35)"
+        );
     }
 
     #[tokio::test]
