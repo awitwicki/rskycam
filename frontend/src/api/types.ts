@@ -156,6 +156,13 @@ export interface NightDetail extends NightSummary {
   frames: FrameInfo[]
 }
 
+/** POST /api/nights/{date}/detect-pole — detected star-trail circle center. */
+export interface PoleDetection {
+  poleXPx: number // in the startrails image's own pixel space
+  poleYPx: number
+  confidence: number // 0..1 vote-peak prominence
+}
+
 // ── image geometry ─────────────────────────────────────────────
 export type MaskMode = 'circle' | 'none'
 

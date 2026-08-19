@@ -123,6 +123,27 @@ describe('buildOverlayGeometry', () => {
   })
 })
 
+describe('raDec horizon reach', () => {
+  it('dec-0 circle reaches the horizon radius at latitude 90', () => {
+    // At latitude 90 the celestial equator IS the horizon: the old 2°
+    // altitude floor culled the whole dec-0 circle; it must now render at
+    // exactly the horizon radius.
+    const g = buildOverlayGeometry({
+      time: new Date('2026-01-01T00:00:00Z'),
+      location: { latitudeDeg: 90, longitudeDeg: 0 },
+      calibration: {
+        lensType: 'fisheye', focalLengthMm: 0.88 / Math.PI, pixelSizeUm: 1,
+        pointingAzDeg: 0, pointingAltDeg: 90, rollDeg: 0, flip: false,
+        centerOffsetXPx: 0, centerOffsetYPx: 0,
+      },
+      layers: { cardinal: false, altAzGrid: false, raDecGrid: true },
+      imageWidth: 1280, imageHeight: 960,
+    })
+    const radii = g.polylines.flatMap((p) => p.points.map(([x, y]) => Math.hypot(x - 640, y - 480)))
+    expect(Math.max(...radii)).toBeCloseTo(440, 0)
+  })
+})
+
 describe('cropGeometry', () => {
   it('offsets points and labels into crop space and takes the crop dimensions', () => {
     const g: OverlayGeometry = {

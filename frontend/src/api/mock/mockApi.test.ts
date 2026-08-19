@@ -209,4 +209,10 @@ describe('MockApi nights', () => {
   it('rebuildNight rejects for an unknown date', async () => {
     await expect(stub().rebuildNight('1999-01-01')).rejects.toThrow(/not found/)
   })
+
+  it('detectPole returns the mock startrails center with high confidence', async () => {
+    const api = new MockApi()
+    const d = await api.detectPole('2026-07-14')
+    expect(d).toEqual({ poleXPx: 360, poleYPx: 360, confidence: 0.9 })
+  })
 })

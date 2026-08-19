@@ -215,6 +215,7 @@ pub fn router(state: AppState) -> Router {
             get(nights::get_night).delete(nights::delete_night),
         )
         .route("/api/nights/{date}/rebuild", post(nights::rebuild_night))
+        .route("/api/nights/{date}/detect-pole", post(nights::detect_pole))
         .route("/api/files/{date}/{*path}", get(nights::get_file))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

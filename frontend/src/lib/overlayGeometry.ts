@@ -39,7 +39,7 @@ export interface BuildOverlayOptions {
   mask?: MaskCircle
 }
 
-const MIN_ALT_RADEC = 2
+const MIN_ALT_RADEC = 0
 
 interface VisSample { altDeg: number; thetaDeg: number; x: number; y: number }
 

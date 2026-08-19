@@ -4,7 +4,7 @@ import { altAzToImage } from './astro'
 import {
   applyCenterPan, applyCropDrag, applyMaskDrag, applyRollDrag, applySkyPan,
   applyWheelZoom, calibrationHitTest, cropHitTest, imageToAltAz,
-  maskHandlePositions, maskHitTest, rollHandlePosition, textFieldHitTest,
+  maskHandlePositions, maskHitTest, rollHandlePosition, solveAimFromPole, textFieldHitTest,
 } from './editorMath'
 
 const cal = {
@@ -202,5 +202,55 @@ describe('textFieldHitTest', () => {
   it('misses outside all boxes', () => {
     expect(textFieldHitTest(500, 42, boxes)).toBeNull()
     expect(textFieldHitTest(100, 200, boxes)).toBeNull()
+  })
+})
+
+describe('solveAimFromPole', () => {
+  const view = { frameWidth: 1280, frameHeight: 960, nativeWidth: 1280 }
+  const base = {
+    lensType: 'fisheye' as const, focalLengthMm: 4.57, pixelSizeUm: 3.75,
+    pointingAzDeg: 0, pointingAltDeg: 90, rollDeg: 0, flip: false,
+    centerOffsetXPx: 0, centerOffsetYPx: 0,
+  }
+
+  it('recovers tilted pointing from the pole pixel (both flips)', () => {
+    const lat = 50.06
+    for (const flip of [false, true]) {
+      for (const [az, alt] of [[300.6, 40], [10, 55], [220, 35]] as const) {
+        const truth = { ...base, flip, rollDeg: 180, pointingAzDeg: az, pointingAltDeg: alt }
+        const pole = altAzToImage(lat, 0, truth, view)
+        const start = { ...base, flip, rollDeg: 180, pointingAzDeg: 100, pointingAltDeg: 70 }
+        const solved = solveAimFromPole(pole.x, pole.y, start, view, lat, false)
+        expect(solved).not.toBeNull()
+        expect(solved!.pointingAzDeg).toBeCloseTo(az, 1)
+        expect(solved!.pointingAltDeg).toBeCloseTo(alt, 1)
+      }
+    }
+  })
+
+  it('recovers zenith roll from the pole pixel, both hemispheres', () => {
+    for (const [lat, poleAz] of [[50.06, 0], [-33.9, 180]] as const) {
+      for (const roll of [0, 47.3, 181, 322.6]) {
+        const truth = { ...base, rollDeg: roll }
+        const pole = altAzToImage(Math.abs(lat), poleAz, truth, view)
+        const solved = solveAimFromPole(pole.x, pole.y, { ...base, rollDeg: 90 }, view, lat, true)
+        expect(solved).not.toBeNull()
+        const diff = Math.abs(((solved!.rollDeg - roll + 540) % 360) - 180)
+        expect(diff).toBeLessThan(0.1)
+      }
+    }
+  })
+
+  it('returns null for an unreachable pole pixel', () => {
+    expect(solveAimFromPole(100_000, 0, base, view, 50, true)).toBeNull()
+  })
+
+  it('returns null for an unreachable pole pixel (tilted mode)', () => {
+    // (100000, 100000) is far beyond any pixel radius this calibration could
+    // ever project a point to, so neither the fixed-point walk nor the
+    // Newton fallback can bring the residual under tolerance from any
+    // starting pointing — exercises solveAimFromPole's own null return via
+    // the newtonTiltedAim path, not just the zenith branch.
+    expect(solveAimFromPole(100_000, 100_000, base, view, 50, false)).toBeNull()
   })
 })

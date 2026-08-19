@@ -73,6 +73,7 @@ function apiWith(patchStatus: Partial<Status>): ApiClient {
     getNight: base.getNight.bind(base),
     rebuildNight: base.rebuildNight.bind(base),
     deleteNight: base.deleteNight.bind(base),
+    detectPole: base.detectPole.bind(base),
     startDarksCapture: base.startDarksCapture.bind(base),
     getDarksLibrary: base.getDarksLibrary.bind(base),
     clearDarks: base.clearDarks.bind(base),

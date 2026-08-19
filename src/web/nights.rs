@@ -414,6 +414,89 @@ pub async fn get_file(
     ([(header::CONTENT_TYPE, mime)], bytes).into_response()
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoleDetection {
+    pub pole_x_px: f64,
+    pub pole_y_px: f64,
+    pub confidence: f64,
+}
+
+fn msg(status: StatusCode, m: &str) -> Response {
+    (status, Json(serde_json::json!({ "message": m }))).into_response()
+}
+
+/// Locates the celestial pole in a night's already-generated `startrails.jpg`
+/// via `processing::polefind`, for the auto-align UI flow (Task 5) to turn
+/// into a mask-center suggestion.
+pub async fn detect_pole(
+    State(state): State<AppState>,
+    AxumPath(date): AxumPath<String>,
+) -> Response {
+    if !is_date(&date) {
+        return msg(StatusCode::BAD_REQUEST, "invalid date");
+    }
+    let path = state
+        .data_dir
+        .join("images")
+        .join(&date)
+        .join("startrails.jpg");
+    // Clone settings out; never hold the lock across blocking work.
+    let s = state.cfg.read().await.settings.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+        let img = image::load_from_memory(&bytes)
+            .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?
+            .to_luma8();
+        // Mask exclusion in this image's own pixel space (spec: shift by the
+        // crop offset when the file is crop-sized; skip when unmappable).
+        let (iw, ih) = (f64::from(img.width()), f64::from(img.height()));
+        let near = |a: f64, b: f64| (a - b).abs() <= 1.0;
+        let sensor = (
+            f64::from(s.camera.capture_width),
+            f64::from(s.camera.capture_height),
+        );
+        let shift = if near(iw, sensor.0) && near(ih, sensor.1) {
+            Some((0.0, 0.0))
+        } else if let Some(c) = &s.image.crop {
+            (near(iw, c.width) && near(ih, c.height)).then_some((c.x, c.y))
+        } else {
+            None
+        };
+        let mask = match (s.image.mask_mode, shift) {
+            (crate::settings::MaskMode::Circle, Some((ox, oy))) => {
+                Some(crate::processing::polefind::MaskExclusion {
+                    cx: s.image.mask_center_x_px - ox,
+                    cy: s.image.mask_center_y_px - oy,
+                    r: s.image.mask_radius_px,
+                })
+            }
+            _ => None,
+        };
+        let e = crate::processing::polefind::find_pole(&img, mask.as_ref());
+        Ok::<_, StatusCode>(PoleDetection {
+            pole_x_px: e.x,
+            pole_y_px: e.y,
+            confidence: e.confidence,
+        })
+    })
+    .await;
+    match result {
+        Ok(Ok(d)) => Json(d).into_response(),
+        Ok(Err(StatusCode::NOT_FOUND)) => {
+            msg(StatusCode::NOT_FOUND, "no startrails for this night")
+        }
+        Ok(Err(_)) => msg(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "startrails image unreadable",
+        ),
+        Err(e) => {
+            tracing::error!("detect-pole task panicked for {date}: {e}");
+            msg(StatusCode::INTERNAL_SERVER_ERROR, "detection failed")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
@@ -873,5 +956,285 @@ mod tests {
         })
         .await
         .expect("rebuild did not produce artifacts within 10s");
+    }
+
+    #[tokio::test]
+    async fn detect_pole_finds_the_center_of_a_synthetic_startrails() {
+        let h = harness();
+        seed_night(&h.state.data_dir, "2026-07-14");
+        let img =
+            crate::processing::polefind::tests_support::synthetic_trails(1280, 960, 900.0, 300.0);
+        img.save(h.state.data_dir.join("images/2026-07-14/startrails.jpg"))
+            .unwrap();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/nights/2026-07-14/detect-pole")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Position tolerance is wider than polefind's own raw-image unit tests
+        // (which hold sub-pixel synthetic trails and stay within 4px): this
+        // test round-trips through JPEG encode/decode, and lossy compression
+        // on 0.75px-thick synthetic trail lines measurably perturbs the
+        // sub-pixel refinement stage. What this test is actually verifying is
+        // the endpoint's file/settings wiring into find_pole, not
+        // find_pole's own sub-pixel accuracy (covered by polefind.rs's
+        // tests on uncompressed images) — so a generous but still
+        // meaningfully-tight bound (matching the off-frame-pole tolerance in
+        // polefind.rs) is the right check here.
+        assert!((v["poleXPx"].as_f64().unwrap() - 900.0).abs() <= 15.0);
+        assert!((v["poleYPx"].as_f64().unwrap() - 300.0).abs() <= 15.0);
+        assert!(v["confidence"].as_f64().unwrap() > 0.8);
+    }
+
+    /// Exercises the crop-shift + mask-exclusion branch: a startrails.jpg
+    /// sized to the *crop* (not the full sensor) must resolve the shift to
+    /// `(crop.x, crop.y)` and, with `mask_mode == Circle`, hand `find_pole`
+    /// a `MaskExclusion` centered at `(mask_center_x_px - crop.x,
+    /// mask_center_y_px - crop.y)` — sensor-space settings translated into
+    /// this image's own crop-local pixel space. The synthetic image also
+    /// carries a bright ring at exactly that crop-local location/radius
+    /// (mirroring `polefind::tests::mask_edge_is_excluded_from_voting`'s
+    /// trail/ring geometry, scaled to this crop's size), so the constructed
+    /// exclusion is exercised against real boundary pixels rather than a
+    /// no-op struct, and the branch runs end-to-end (shift resolution →
+    /// `MaskExclusion` construction → `find_pole`) without panicking,
+    /// landing close to the trails' true crop-local center.
+    ///
+    /// Saved as PNG (despite the `.jpg` name — `image::load_from_memory`
+    /// sniffs the real format from content, not the extension) to isolate
+    /// this test's signal from the JPEG-compression noise already exercised
+    /// by `detect_pole_finds_the_center_of_a_synthetic_startrails` above.
+    #[tokio::test]
+    async fn detect_pole_shifts_the_mask_by_the_crop_offset() {
+        use crate::settings::{CropRect, MaskMode};
+
+        let h = harness();
+        seed_night(&h.state.data_dir, "2026-07-14");
+
+        let crop = CropRect {
+            x: 100.0,
+            y: 50.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        // Ring in crop-local (image) coordinates. Same relative geometry
+        // (scaled 0.625x for the 800x600 crop) as
+        // `polefind::tests::mask_edge_is_excluded_from_voting`'s trail/ring
+        // arrangement, which is large and close enough to the trail
+        // structure to noticeably pull the vote if left unexcluded.
+        let (ring_x, ring_y, ring_r) = (400.0, 300.0, 262.5);
+
+        {
+            let mut cfg = h.state.cfg.write().await;
+            cfg.settings.image.mask_mode = MaskMode::Circle;
+            cfg.settings.image.crop = Some(crop);
+            // Sensor-space mask circle: crop-local ring shifted by the crop
+            // offset, i.e. what an operator would see/set in the full-sensor
+            // mask editor.
+            cfg.settings.image.mask_center_x_px = ring_x + crop.x;
+            cfg.settings.image.mask_center_y_px = ring_y + crop.y;
+            cfg.settings.image.mask_radius_px = ring_r;
+        }
+
+        let (trail_x, trail_y) = (562.5, 187.5);
+        let mut img = crate::processing::polefind::tests_support::synthetic_trails(
+            crop.width as u32,
+            crop.height as u32,
+            trail_x,
+            trail_y,
+        );
+        for i in 0..12_000 {
+            let a = i as f64 * std::f64::consts::TAU / 12_000.0;
+            let px = (ring_x + ring_r * a.cos()) as i64;
+            let py = (ring_y + ring_r * a.sin()) as i64;
+            if px >= 0
+                && py >= 0
+                && (px as u32) < crop.width as u32
+                && (py as u32) < crop.height as u32
+            {
+                img.put_pixel(px as u32, py as u32, image::Luma([255u8]));
+            }
+        }
+        img.save_with_format(
+            h.state.data_dir.join("images/2026-07-14/startrails.jpg"),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/nights/2026-07-14/detect-pole")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!((v["poleXPx"].as_f64().unwrap() - trail_x).abs() <= 10.0);
+        assert!((v["poleYPx"].as_f64().unwrap() - trail_y).abs() <= 10.0);
+        assert!(v["confidence"].as_f64().unwrap() > 0.3);
+    }
+
+    /// Exercises the *sensor*-match branch of the mask/crop-shift
+    /// resolution — the common real-world case: no crop configured, and
+    /// `startrails.jpg` sized to the full sensor. The crop-offset branch
+    /// above already has dedicated coverage; this proves the sensor-match
+    /// branch actually resolves to offset `(0, 0)` and applies the mask
+    /// (rather than silently falling into the "neither matched, skip the
+    /// mask" branch). A bright mask-boundary ring at a different center
+    /// than the trails (same construction as
+    /// `polefind::tests::mask_edge_is_excluded_from_voting`, scaled to this
+    /// harness's default 1640x1232 sensor from `Settings::default()` in
+    /// `src/settings.rs`) would hijack the vote if the mask weren't applied
+    /// at all or applied at a nonzero shift — so a result landing near the
+    /// trails' true center proves the sensor-match branch fired correctly.
+    ///
+    /// Saved as PNG (despite the `.jpg` name) for the same reason as
+    /// `detect_pole_shifts_the_mask_by_the_crop_offset`: isolate this
+    /// test's signal from JPEG-compression noise on the thin ring/trail
+    /// lines.
+    #[tokio::test]
+    async fn detect_pole_applies_the_mask_unshifted_for_a_sensor_sized_image() {
+        use crate::settings::MaskMode;
+
+        let h = harness();
+        seed_night(&h.state.data_dir, "2026-07-14");
+
+        // Matches `Settings::default()`'s capture_width/height — the
+        // harness loads default settings, so this is the sensor size the
+        // endpoint will match `startrails.jpg`'s dimensions against.
+        let (sensor_w, sensor_h) = (1640u32, 1232u32);
+        let (mask_x, mask_y, mask_r) = (820.0, 616.0, 550.0);
+
+        {
+            let mut cfg = h.state.cfg.write().await;
+            cfg.settings.image.mask_mode = MaskMode::Circle;
+            cfg.settings.image.crop = None;
+            cfg.settings.image.mask_center_x_px = mask_x;
+            cfg.settings.image.mask_center_y_px = mask_y;
+            cfg.settings.image.mask_radius_px = mask_r;
+        }
+
+        let (trail_x, trail_y) = (1000.0, 350.0);
+        let mut img = crate::processing::polefind::tests_support::synthetic_trails(
+            sensor_w, sensor_h, trail_x, trail_y,
+        );
+        for i in 0..12_000 {
+            let a = i as f64 * std::f64::consts::TAU / 12_000.0;
+            let px = (mask_x + mask_r * a.cos()) as i64;
+            let py = (mask_y + mask_r * a.sin()) as i64;
+            if px >= 0 && py >= 0 && (px as u32) < sensor_w && (py as u32) < sensor_h {
+                img.put_pixel(px as u32, py as u32, image::Luma([255u8]));
+            }
+        }
+        img.save_with_format(
+            h.state.data_dir.join("images/2026-07-14/startrails.jpg"),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/nights/2026-07-14/detect-pole")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!((v["poleXPx"].as_f64().unwrap() - trail_x).abs() <= 10.0);
+        assert!((v["poleYPx"].as_f64().unwrap() - trail_y).abs() <= 10.0);
+        assert!(v["confidence"].as_f64().unwrap() > 0.3);
+    }
+
+    #[tokio::test]
+    async fn detect_pole_rejects_bad_dates_missing_nights_and_bad_images() {
+        let h = harness();
+        seed_night(&h.state.data_dir, "2026-07-14");
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+
+        // Invalid date → 400.
+        let bad_date = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/nights/not-a-date/detect-pole")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_date.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value =
+            serde_json::from_slice(&bad_date.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(!body["message"].as_str().unwrap().is_empty());
+
+        // Valid date, no startrails.jpg → 404.
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/nights/2026-07-14/detect-pole")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let body: serde_json::Value =
+            serde_json::from_slice(&missing.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(!body["message"].as_str().unwrap().is_empty());
+
+        // startrails.jpg present but not a valid image → 422.
+        let night = h.state.data_dir.join("images").join("2026-07-14");
+        std::fs::write(night.join("startrails.jpg"), b"not a jpeg").unwrap();
+        let bad_image = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/nights/2026-07-14/detect-pole")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_image.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: serde_json::Value =
+            serde_json::from_slice(&bad_image.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(!body["message"].as_str().unwrap().is_empty());
     }
 }

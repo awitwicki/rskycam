@@ -1,6 +1,6 @@
 import type {
   ApiEvent, DarksLibrary, LightgraphData, LogsResponse, NightDetail, NightSummary,
-  OverlayGeometry, OverlayRequest, Settings, Status, UpdateInfo,
+  OverlayGeometry, OverlayRequest, PoleDetection, Settings, Status, UpdateInfo,
 } from './types'
 import { MockApi } from './mock/mockApi'
 import { RealApi } from './realApi'
@@ -25,6 +25,7 @@ export interface ApiClient {
   getNight(date: string): Promise<NightDetail>
   rebuildNight(date: string): Promise<void>
   deleteNight(date: string): Promise<void>
+  detectPole(date: string): Promise<PoleDetection>
   startDarksCapture(): Promise<void>
   getDarksLibrary(): Promise<DarksLibrary>
   clearDarks(): Promise<void>

@@ -1,9 +1,10 @@
-import { Plus, Trash2 } from 'lucide-react'
+import { Plus, Trash2, Wand2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import { getApi } from '../api/client'
 import type {
-  CropRect, ImageSettings, LensCalibration, LensType, MaskMode, OverlayGeometry,
-  OverlayLayers, OverlaySettings, OverlayTextField, Settings, TextFieldKind,
+  CropRect, ImageSettings, LensCalibration, LensType, MaskMode, NightSummary,
+  OverlayGeometry, OverlayLayers, OverlaySettings, OverlayTextField, Settings,
+  TextFieldKind,
 } from '../api/types'
 import { drawOverlay } from '../components/OverlayCanvas'
 import { Button, Card, NumberField, Toggle } from '../components/ui'
@@ -11,13 +12,16 @@ import {
   applyCenterPan, applyCropDrag, applyMaskDrag, applyRollDrag, applySkyPan,
   applyWheelZoom, calibrationHitTest, cropHandlePositions, cropHitTest,
   imageToAltAz, maskHandlePositions, maskHitTest, rollHandlePosition,
-  textFieldHitTest,
+  solveAimFromPole, textFieldHitTest,
   type CalibrationTarget, type CropHandle, type MaskHandle, type TextFieldBox,
 } from '../lib/editorMath'
 import { focalLengthPx, opticalCenter, type LensView } from '../lib/astro'
 import { useStatus } from '../hooks/useStatus'
 import { formatExposure, formatGain } from '../lib/format'
 import { buildOverlayGeometry } from '../lib/overlayGeometry'
+import {
+  classifyStartrailsFit, startrailsImgStyle, thumbUrl, type Dims,
+} from '../lib/startrailsBackground'
 import { uid } from '../lib/uid'
 
 type EditorMode = 'calibrate' | 'crop'
@@ -182,6 +186,13 @@ export default function OverlayEditorPage() {
   const [rawUrl, setRawUrl] = useState(() => getApi().latestImageUrl({ raw: true }))
   // Native size of the raw frame, learned when the image loads.
   const [frameDims, setFrameDims] = useState({ w: 1280, h: 960 })
+  // Startrails background — a session-only stand-in for the live frame, for
+  // aligning the RA/Dec grid against real star trails.
+  const [bgNight, setBgNight] = useState<{ date: string; url: string } | null>(null)
+  const [bgDims, setBgDims] = useState<Dims | null>(null)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [nights, setNights] = useState<NightSummary[] | null>(null)
+  const [alignNote, setAlignNote] = useState<{ ok: boolean; text: string } | null>(null)
 
   const view: LensView = useMemo(() => ({
     frameWidth: frameDims.w,
@@ -189,10 +200,24 @@ export default function OverlayEditorPage() {
     nativeWidth: status?.camera?.maxWidth ?? frameDims.w,
   }), [frameDims, status?.camera?.maxWidth])
 
-  // The editor always works on the uncropped sensor frame.
+  // The editor always works on the uncropped sensor frame. The live refresh
+  // pauses while a startrails background covers it, and catches up on return.
   useEffect(() => {
-    setRawUrl(getApi().latestImageUrl({ raw: true }))
-  }, [frame?.meta.timestamp])
+    if (!bgNight) setRawUrl(getApi().latestImageUrl({ raw: true }))
+  }, [frame?.meta.timestamp, bgNight])
+
+  const togglePicker = () => {
+    setPickerOpen((o) => !o)
+    // A failed listing degrades to the empty-state hint rather than killing
+    // the whole editor with the page-level error.
+    if (!nights) void getApi().getNights().then(setNights).catch(() => setNights([]))
+  }
+
+  const selectNight = (n: { date: string; url: string }) => {
+    setBgNight(n)
+    setBgDims(null)
+    setPickerOpen(false)
+  }
 
   const sampleFor = (kind: TextFieldKind): string => {
     if (kind === 'time') return new Date().toLocaleString()
@@ -435,9 +460,59 @@ export default function OverlayEditorPage() {
   const cal = draft.calibration
   const crop = draftImage.crop
 
+  // The startrails on disk was cut with the crop that was active when it was
+  // built — compare against the saved crop, not the in-editor draft, so
+  // editing the crop can't shift the background live.
+  const bgFit = bgNight && bgDims
+    ? classifyStartrailsFit(bgDims, frameDims, settings.image.crop)
+    : null
+  const readyNights = nights?.flatMap((n) =>
+    n.startrails.state === 'ready' ? [{ date: n.date, url: n.startrails.url }] : []) ?? null
+
+  const autoAlign = async () => {
+    if (!bgNight) {
+      if (!pickerOpen) togglePicker()
+      return
+    }
+    if (!bgDims) {
+      // The <img> hasn't fired onLoad yet (right after selectNight()) — a
+      // transient state, not a real mismatch, so don't show the permanent
+      // "doesn't match" note for it.
+      setAlignNote({ ok: false, text: 'Still loading the startrails image — try again in a moment.' })
+      return
+    }
+    if (!bgFit || bgFit.kind === 'mismatch') {
+      setAlignNote({ ok: false, text: 'This startrails doesn’t match the sensor/crop size — can’t map its coordinates.' })
+      return
+    }
+    try {
+      const d = await getApi().detectPole(bgNight.date)
+      const ox = bgFit.kind === 'cropOffset' ? bgFit.rect.x : 0
+      const oy = bgFit.kind === 'cropOffset' ? bgFit.rect.y : 0
+      const solved = solveAimFromPole(
+        d.poleXPx + ox, d.poleYPx + oy, draft.calibration, view,
+        settings.location.latitudeDeg, zenithMode,
+      )
+      if (!solved) {
+        setAlignNote({ ok: false, text: 'Detected pole can’t be reached by the current lens model — check focal length / pixel size.' })
+        return
+      }
+      setDraft({ ...draft, calibration: solved })
+      const pct = Math.round(d.confidence * 100)
+      setAlignNote({
+        ok: true,
+        text: `Pole at ${Math.round(d.poleXPx + ox)}, ${Math.round(d.poleYPx + oy)} · confidence ${pct}%${d.confidence < 0.4 ? ' — likely unreliable (clouds?)' : ''}`,
+      })
+    } catch (e) {
+      setAlignNote({ ok: false, text: String(e) })
+    }
+  }
+
   let editorHint: string
   if (mode === 'crop') {
     editorHint = 'Drag the corner handles to crop the frame. Everything dimmed is cut away.'
+  } else if (bgNight) {
+    editorHint = 'Aligning against startrails: the declination circles of the RA/Dec grid should trace the star trails — drag to center, drag N to rotate, scroll to zoom. RA hour lines are drawn for the current time, not the night the trails were shot.'
   } else if (zenithMode) {
     editorHint = 'Drag anywhere to center the grid, drag the N handle to rotate it, scroll to zoom — or grab a text label to reposition it. The full sensor frame is shown here; the dashboard shows the cropped result.'
   } else {
@@ -446,10 +521,46 @@ export default function OverlayEditorPage() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-3">
-      <Card title="Overlay editor" className="lg:col-span-2">
+      <Card title="Overlay editor" className="lg:col-span-2"
+        action={
+          <div className="flex gap-2">
+            <Button variant={bgNight ? 'ghost' : 'primary'} className="!px-2.5 !py-1 text-xs"
+              onClick={() => { setBgNight(null); setBgDims(null); setPickerOpen(false) }}>
+              Live
+            </Button>
+            <Button variant={bgNight ? 'primary' : 'ghost'} className="!px-2.5 !py-1 text-xs"
+              onClick={togglePicker}>
+              Startrails…
+            </Button>
+          </div>
+        }>
         <p className="mb-2 text-xs text-fgdim">
           {editorHint}
         </p>
+        {pickerOpen && (
+          <div className="mb-2 flex gap-2 overflow-x-auto rounded-lg border border-line bg-panel2 p-2">
+            {readyNights === null ? (
+              <p className="text-xs text-fgdim">Loading…</p>
+            ) : readyNights.length === 0 ? (
+              <p className="text-xs text-fgdim">No startrails yet.</p>
+            ) : (
+              readyNights.map((n) => (
+                <button key={n.date} onClick={() => selectNight(n)}
+                  className="flex shrink-0 flex-col items-center gap-1 rounded-lg border border-line p-1.5 hover:border-accent">
+                  <img src={thumbUrl(n.url)} alt={`Startrails thumbnail ${n.date}`}
+                    className="h-20 w-20 rounded object-cover" />
+                  <span className="font-mono text-xs text-fgdim">{n.date}</span>
+                </button>
+              ))
+            )}
+          </div>
+        )}
+        {bgDims && bgFit?.kind === 'mismatch' && (
+          <p className="mb-2 text-xs text-warn">
+            This startrails ({bgDims.w}×{bgDims.h}) matches neither the sensor frame nor the
+            current crop — it was likely made with different settings, so grid alignment may be off.
+          </p>
+        )}
         <div className="overflow-hidden rounded-lg bg-night">
           <div className="relative lg:mx-auto lg:w-fit">
             <img src={rawUrl} alt="Calibration frame"
@@ -458,6 +569,16 @@ export default function OverlayEditorPage() {
                 if (img.naturalWidth > 0) setFrameDims({ w: img.naturalWidth, h: img.naturalHeight })
               }}
               className="w-full lg:h-auto lg:max-h-[calc(100dvh-16rem)] lg:w-auto lg:max-w-full" />
+            {bgNight && (
+              <div className="absolute inset-0 overflow-hidden bg-night">
+                <img src={bgNight.url} alt={`Startrails ${bgNight.date}`}
+                  onLoad={(e) => {
+                    const img = e.currentTarget
+                    if (img.naturalWidth > 0) setBgDims({ w: img.naturalWidth, h: img.naturalHeight })
+                  }}
+                  style={bgFit ? startrailsImgStyle(bgFit, frameDims) : { visibility: 'hidden' }} />
+              </div>
+            )}
             <canvas
               ref={canvasRef}
               className="absolute inset-0 h-full w-full touch-none cursor-crosshair"
@@ -548,6 +669,14 @@ export default function OverlayEditorPage() {
           <div className="mb-3">
             <Toggle label="Camera points at the zenith (all-sky)" checked={zenithMode}
               onChange={setZenith} />
+          </div>
+          <div className="mb-3 flex flex-col gap-1">
+            <Button variant="ghost" onClick={() => { void autoAlign() }} className="!py-1.5 text-xs">
+              <Wand2 size={12} /> Auto-align from startrails
+            </Button>
+            {alignNote && (
+              <p className={`text-xs ${alignNote.ok ? 'text-fgdim' : 'text-danger'}`}>{alignNote.text}</p>
+            )}
           </div>
           <div className="grid grid-cols-2 gap-3">
             <label className="col-span-2 flex flex-col gap-1 text-sm">

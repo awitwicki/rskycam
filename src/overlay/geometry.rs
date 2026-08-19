@@ -71,7 +71,7 @@ pub struct BuildOptions<'a> {
     pub mask: Option<MaskCircle>,
 }
 
-const MIN_ALT_RADEC: f64 = 2.0;
+const MIN_ALT_RADEC: f64 = 0.0;
 
 /// Split a sampled line into segments inside the usable field of view:
 /// θ ≤ theta_max, (when min_alt is set) above the horizon, and (when a mask
@@ -611,5 +611,38 @@ mod tests {
         assert_eq!(format_exposure(2_500_000), "2.5 s");
         assert_eq!(format_exposure(4_000), "0.004 s");
         assert_eq!(format_exposure(32), "0.000032 s");
+    }
+
+    #[test]
+    fn dec_zero_circle_reaches_the_horizon_at_latitude_90() {
+        // At latitude 90 the celestial equator IS the horizon; the old 2°
+        // altitude floor culled the whole dec-0 circle.
+        let (time, mut loc, cal) = base();
+        loc.latitude_deg = 90.0;
+        loc.longitude_deg = 0.0;
+        let geometry = build_overlay_geometry(&BuildOptions {
+            time,
+            location: &loc,
+            calibration: &cal,
+            layers: &OverlayLayers {
+                ra_dec_grid: true,
+                ..NONE
+            },
+            grid_opacity: None,
+            image_width: 1280,
+            image_height: 960,
+            native_width: 1280,
+            mask: None,
+        });
+        let max_r = geometry
+            .polylines
+            .iter()
+            .flat_map(|p| p.points.iter())
+            .map(|&[x, y]| ((x - 640.0).powi(2) + (y - 480.0).powi(2)).sqrt())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            (max_r - 440.0).abs() < 1.0,
+            "raDec must reach the horizon radius, got {max_r}"
+        );
     }
 }
