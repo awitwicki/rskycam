@@ -1,11 +1,42 @@
+use std::sync::OnceLock;
+
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::overlay::astro;
 use crate::settings::{
     CropRect, ImageSettings, LensCalibration, LocationSettings, MaskMode, OverlayLayers,
     OverlayTextField, TextFieldKind,
 };
+
+/// Constellation stick-figure data — see frontend/src/lib/constellations.json
+/// (the canonical copy; frontend/src/lib/constellations.NOTICE.md has the
+/// license/attribution) for provenance. Embedded here so both sides render
+/// from byte-identical data.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConstellationDef {
+    name: String,
+    label_ra_deg: f64,
+    label_dec_deg: f64,
+    lines: Vec<Vec<[f64; 2]>>,
+}
+
+#[derive(Deserialize)]
+struct ConstellationsFile {
+    constellations: Vec<ConstellationDef>,
+}
+
+const CONSTELLATIONS_JSON: &str = include_str!("../../frontend/src/lib/constellations.json");
+
+fn constellations() -> &'static [ConstellationDef] {
+    static DATA: OnceLock<Vec<ConstellationDef>> = OnceLock::new();
+    DATA.get_or_init(|| {
+        serde_json::from_str::<ConstellationsFile>(CONSTELLATIONS_JSON)
+            .expect("embedded constellations.json is valid")
+            .constellations
+    })
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +93,7 @@ pub struct BuildOptions<'a> {
     pub calibration: &'a LensCalibration,
     pub layers: &'a OverlayLayers,
     pub grid_opacity: Option<f64>,
+    pub constellations_opacity: Option<f64>,
     pub image_width: u32,
     pub image_height: u32,
     /// Native sensor width for plate scale; == image_width when unknown.
@@ -116,6 +148,13 @@ pub fn build_overlay_geometry(o: &BuildOptions) -> OverlayGeometry {
     let mut polylines = Vec::new();
     let mut labels = Vec::new();
     let opacity = o.grid_opacity;
+    let lst = astro::lst_deg(o.time, o.location.longitude_deg);
+    let lat = o.location.latitude_deg;
+    let sample = |ra: f64, dec: f64| -> (f64, f64, f64, f64) {
+        let aa = astro::ra_dec_to_alt_az(ra, dec, lat, lst);
+        let p = astro::alt_az_to_image(aa.alt_deg, aa.az_deg, cal, &view);
+        (aa.alt_deg, p.theta_deg, p.x, p.y)
+    };
 
     if o.layers.alt_az_grid {
         for alt in [0.0f64, 30.0, 60.0] {
@@ -172,13 +211,6 @@ pub fn build_overlay_geometry(o: &BuildOptions) -> OverlayGeometry {
     }
 
     if o.layers.ra_dec_grid {
-        let lst = astro::lst_deg(o.time, o.location.longitude_deg);
-        let lat = o.location.latitude_deg;
-        let sample = |ra: f64, dec: f64| -> (f64, f64, f64, f64) {
-            let aa = astro::ra_dec_to_alt_az(ra, dec, lat, lst);
-            let p = astro::alt_az_to_image(aa.alt_deg, aa.az_deg, cal, &view);
-            (aa.alt_deg, p.theta_deg, p.x, p.y)
-        };
         // ±80 keeps a small circle around each celestial pole (no hole).
         for dec in [-80.0f64, -60.0, -30.0, 0.0, 30.0, 60.0, 80.0] {
             let mut samples = Vec::new();
@@ -212,6 +244,34 @@ pub fn build_overlay_geometry(o: &BuildOptions) -> OverlayGeometry {
                 });
             }
             ra += 30.0;
+        }
+    }
+
+    if o.layers.constellations {
+        for c in constellations() {
+            for line in &c.lines {
+                let samples: Vec<(f64, f64, f64, f64)> =
+                    line.iter().map(|p| sample(p[0], p[1])).collect();
+                for points in visible_segments(&samples, Some(MIN_ALT_RADEC), theta_max, o.mask) {
+                    polylines.push(OverlayPolyline {
+                        layer: "constellations".into(),
+                        points,
+                        opacity: o.constellations_opacity,
+                    });
+                }
+            }
+            let (label_alt, label_theta, label_x, label_y) =
+                sample(c.label_ra_deg, c.label_dec_deg);
+            if label_alt >= MIN_ALT_RADEC && label_theta <= theta_max {
+                labels.push(OverlayLabel {
+                    layer: "constellationLabels".into(),
+                    text: c.name.clone(),
+                    x: label_x,
+                    y: label_y,
+                    font_size: 13.0,
+                    align: None,
+                });
+            }
         }
     }
 
@@ -341,6 +401,7 @@ mod tests {
             calibration: &cal,
             layers: &layers,
             grid_opacity,
+            constellations_opacity: None,
             image_width: 960,
             image_height: 960,
             native_width: 960,
@@ -352,6 +413,7 @@ mod tests {
         cardinal: false,
         alt_az_grid: false,
         ra_dec_grid: false,
+        constellations: false,
     };
 
     #[test]
@@ -461,6 +523,7 @@ mod tests {
             alt_az_grid: true,
             ra_dec_grid: true,
             cardinal: true,
+            constellations: false,
         };
         let mask = MaskCircle {
             center_x_px: 500.0,
@@ -484,6 +547,7 @@ mod tests {
             calibration: &cal,
             layers: &layers,
             grid_opacity: None,
+            constellations_opacity: None,
             image_width: 960,
             image_height: 960,
             native_width: 960,
@@ -515,6 +579,7 @@ mod tests {
                 ..NONE
             },
             grid_opacity: None,
+            constellations_opacity: None,
             image_width: 960,
             image_height: 960,
             native_width: 960,
@@ -629,6 +694,7 @@ mod tests {
                 ..NONE
             },
             grid_opacity: None,
+            constellations_opacity: None,
             image_width: 1280,
             image_height: 960,
             native_width: 1280,
@@ -644,5 +710,92 @@ mod tests {
             (max_r - 440.0).abs() < 1.0,
             "raDec must reach the horizon radius, got {max_r}"
         );
+    }
+
+    #[test]
+    fn constellations_opacity_is_stamped_on_lines_but_not_labels() {
+        let (time, loc, cal) = base();
+        let layers = OverlayLayers {
+            constellations: true,
+            ..NONE
+        };
+        let g = build_overlay_geometry(&BuildOptions {
+            time,
+            location: &loc,
+            calibration: &cal,
+            layers: &layers,
+            grid_opacity: None,
+            constellations_opacity: Some(0.2),
+            image_width: 960,
+            image_height: 960,
+            native_width: 960,
+            mask: None,
+        });
+        assert!(!g.polylines.is_empty());
+        assert!(g
+            .polylines
+            .iter()
+            .all(|p| p.layer == "constellations" && p.opacity == Some(0.2)));
+        assert!(!g.labels.is_empty());
+        assert!(g.labels.iter().all(|l| l.layer == "constellationLabels"));
+    }
+
+    #[test]
+    fn constellations_layer_projects_a_known_constellation_and_its_label() {
+        let g = build(
+            OverlayLayers {
+                constellations: true,
+                ..NONE
+            },
+            None,
+        );
+        let (time, loc, cal) = base();
+        let lst = astro::lst_deg(time, loc.longitude_deg);
+        let view = astro::LensView {
+            frame_width: 960,
+            frame_height: 960,
+            native_width: 960,
+        };
+        let project = |ra: f64, dec: f64| -> (f64, f64) {
+            let aa = astro::ra_dec_to_alt_az(ra, dec, loc.latitude_deg, lst);
+            let p = astro::alt_az_to_image(aa.alt_deg, aa.az_deg, &cal, &view);
+            (p.x, p.y)
+        };
+        // Ursa Minor (UMi) from frontend/src/lib/constellations.json —
+        // circumpolar at latitude 50.45 (lowest dec 71.8 > 90 - lat), so
+        // every point stays above the horizon and this renders as a single
+        // unsplit 8-point polyline. Same fixed vertices as the paired TS
+        // test in overlayGeometry.test.ts.
+        const UMI_LINE: [(f64, f64); 8] = [
+            (236.0147, 77.7945),
+            (244.3762, 75.7553),
+            (230.1821, 71.834),
+            (222.6764, 74.1555),
+            (236.0147, 77.7945),
+            (251.4927, 82.0373),
+            (263.0542, 86.5865),
+            (37.9545, 89.2641),
+        ];
+        let expected: Vec<(f64, f64)> =
+            UMI_LINE.iter().map(|&(ra, dec)| project(ra, dec)).collect();
+        let found =
+            g.polylines.iter().any(|pl| {
+                pl.layer == "constellations"
+                    && pl.points.len() == expected.len()
+                    && pl.points.iter().zip(expected.iter()).all(|(p, &(ex, ey))| {
+                        ((p[0] - ex).powi(2) + (p[1] - ey).powi(2)).sqrt() < 1e-6
+                    })
+            });
+        assert!(found, "expected a projected Ursa Minor polyline");
+
+        let (lx, ly) = project(226.5, 68.0); // UMi's label_ra_deg/label_dec_deg
+        let label = g
+            .labels
+            .iter()
+            .find(|l| l.layer == "constellationLabels" && l.text == "Ursa Minor");
+        assert!(label.is_some(), "expected a Ursa Minor label");
+        let label = label.unwrap();
+        assert!((label.x - lx).abs() < 1e-6);
+        assert!((label.y - ly).abs() < 1e-6);
     }
 }

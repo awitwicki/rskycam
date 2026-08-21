@@ -43,7 +43,7 @@ function isTextTarget(h: DragTarget): h is TextTarget {
 /** With every layer off there is nothing on screen to calibrate — the
  *  Calibration card, skeleton and aim/zoom gestures all hide together. */
 function anyLayerOn(layers: OverlayLayers): boolean {
-  return layers.cardinal || layers.altAzGrid || layers.raDecGrid
+  return layers.cardinal || layers.altAzGrid || layers.raDecGrid || layers.constellations
 }
 
 function drawSkeleton(
@@ -266,6 +266,7 @@ export default function OverlayEditorPage() {
       calibration: draft.calibration,
       layers: draft.layers,
       gridOpacity: draft.gridOpacity,
+      constellationsOpacity: draft.constellationsOpacity,
       imageWidth: frameDims.w,
       imageHeight: frameDims.h,
       nativeWidth: view.nativeWidth,
@@ -648,6 +649,8 @@ export default function OverlayEditorPage() {
               onChange={(v) => setDraft({ ...draft, layers: { ...draft.layers, altAzGrid: v } })} />
             <Toggle label="RA/Dec grid" checked={draft.layers.raDecGrid}
               onChange={(v) => setDraft({ ...draft, layers: { ...draft.layers, raDecGrid: v } })} />
+            <Toggle label="Constellations" checked={draft.layers.constellations}
+              onChange={(v) => setDraft({ ...draft, layers: { ...draft.layers, constellations: v } })} />
             <label className="flex flex-col gap-1 text-sm">
               <span className="flex items-baseline justify-between">
                 <span className="text-fgdim">Grid opacity</span>
@@ -656,6 +659,16 @@ export default function OverlayEditorPage() {
               <input type="range" min={0.1} max={1} step={0.05} value={draft.gridOpacity}
                 aria-label="Grid opacity"
                 onChange={(e) => setDraft({ ...draft, gridOpacity: Number(e.target.value) })}
+                className="accent-accent" />
+            </label>
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="flex items-baseline justify-between">
+                <span className="text-fgdim">Constellation opacity</span>
+                <span className="font-mono text-xs">{Math.round(draft.constellationsOpacity * 100)}%</span>
+              </span>
+              <input type="range" min={0.1} max={1} step={0.05} value={draft.constellationsOpacity}
+                aria-label="Constellation opacity"
+                onChange={(e) => setDraft({ ...draft, constellationsOpacity: Number(e.target.value) })}
                 className="accent-accent" />
             </label>
             <Toggle label="Mirror east/west (flip)" checked={cal.flip}

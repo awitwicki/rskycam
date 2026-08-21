@@ -15,6 +15,8 @@ fn layer_style(layer: &str) -> (Rgb<u8>, f32) {
         "raDec" => (Rgb([240, 164, 76]), 1.0),
         "cardinal" => (Rgb([226, 232, 244]), 0.9),
         "text" => (Rgb([226, 232, 244]), 0.95),
+        "constellations" => (Rgb([178, 158, 255]), 1.0),
+        "constellationLabels" => (Rgb([178, 158, 255]), 0.9),
         _ => (Rgb([255, 255, 255]), 0.4),
     }
 }
@@ -123,6 +125,30 @@ mod tests {
     }
 
     #[test]
+    fn constellations_layer_blends_at_its_stamped_opacity() {
+        let mut img = black(100, 100);
+        bake_overlay(
+            &mut img,
+            &geo(
+                vec![OverlayPolyline {
+                    layer: "constellations".into(),
+                    points: vec![[10.0, 50.0], [90.0, 50.0]],
+                    opacity: Some(0.55), // settings.overlay.constellationsOpacity default
+                }],
+                vec![],
+            ),
+        );
+        // Black blended 55% toward rgb(178,158,255): far short of full color.
+        let px = img.get_pixel(50, 50);
+        assert!(
+            px.0[2] > 120 && px.0[2] < 160,
+            "blue channel was {}",
+            px.0[2]
+        );
+        assert_ne!(px, &Rgb([178, 158, 255]));
+    }
+
+    #[test]
     fn full_opacity_line_reaches_the_layer_color() {
         let mut img = black(100, 100);
         bake_overlay(
@@ -166,6 +192,30 @@ mod tests {
     }
 
     #[test]
+    fn constellation_label_draws_text_pixels_near_the_anchor() {
+        let mut img = black(100, 100);
+        bake_overlay(
+            &mut img,
+            &geo(
+                vec![],
+                vec![OverlayLabel {
+                    layer: "constellationLabels".into(),
+                    text: "Orion".into(),
+                    x: 50.0,
+                    y: 50.0,
+                    font_size: 13.0,
+                    align: Some("center".into()),
+                }],
+            ),
+        );
+        let lit = (30..70)
+            .flat_map(|x| (35..65).map(move |y| (x, y)))
+            .filter(|&(x, y)| img.get_pixel(x, y).0 != [0, 0, 0])
+            .count();
+        assert!(lit > 5, "expected text pixels near the anchor, got {lit}");
+    }
+
+    #[test]
     fn out_of_bounds_points_do_not_panic() {
         let mut img = black(50, 50);
         bake_overlay(
@@ -199,6 +249,7 @@ mod tests {
             calibration: &s.overlay.calibration,
             layers: &s.overlay.layers,
             grid_opacity: Some(s.overlay.grid_opacity),
+            constellations_opacity: Some(s.overlay.constellations_opacity),
             image_width: 1280,
             image_height: 960,
             native_width: 1280,

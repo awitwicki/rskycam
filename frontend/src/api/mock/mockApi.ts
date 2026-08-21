@@ -38,8 +38,9 @@ export function defaultSettings(): Settings {
         pointingAzDeg: 0, pointingAltDeg: 90, rollDeg: 0, flip: false,
         centerOffsetXPx: 0, centerOffsetYPx: 0,
       },
-      layers: { cardinal: true, altAzGrid: true, raDecGrid: true },
+      layers: { cardinal: true, altAzGrid: true, raDecGrid: true, constellations: false },
       gridOpacity: 0.45,
+      constellationsOpacity: 0.55,
       textFields: [
         { id: 'time', kind: 'time', x: 24, y: 40, fontSize: 24 },
         { id: 'exposure', kind: 'exposure', x: 24, y: 72, fontSize: 18 },
@@ -308,6 +309,7 @@ export class MockApi implements ApiClient {
       calibration: req.calibration ?? s.overlay.calibration,
       layers: req.layers ?? s.overlay.layers,
       gridOpacity: req.gridOpacity ?? s.overlay.gridOpacity,
+      constellationsOpacity: req.constellationsOpacity ?? s.overlay.constellationsOpacity,
       imageWidth: SENSOR_W,
       imageHeight: SENSOR_H,
       nativeWidth: SENSOR_W,

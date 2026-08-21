@@ -2,12 +2,17 @@ import { useEffect, useRef } from 'react'
 import type { OverlayGeometry } from '../api/types'
 
 const LAYER_STYLE: Record<string, string> = {
-  // Grid lines are full-strength here; transparency comes from the
-  // polyline's own opacity (settings.overlay.gridOpacity).
+  // Grid/constellation lines are full-strength here; transparency comes
+  // from the polyline's own opacity (settings.overlay.gridOpacity /
+  // constellationsOpacity).
   altAz: 'rgb(76,201,240)',
   raDec: 'rgb(240,164,76)',
   cardinal: 'rgba(226,232,244,0.9)',
   text: 'rgba(226,232,244,0.95)',
+  constellations: 'rgb(178,158,255)',
+  // Not stamped with constellationsOpacity — names stay legible even when
+  // the lines are dimmed.
+  constellationLabels: 'rgba(178,158,255,0.9)',
 }
 
 export function drawOverlay(ctx: CanvasRenderingContext2D, g: OverlayGeometry) {

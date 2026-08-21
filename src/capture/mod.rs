@@ -177,6 +177,7 @@ pub fn process_frame(
             calibration: &s.overlay.calibration,
             layers: &s.overlay.layers,
             grid_opacity: Some(s.overlay.grid_opacity),
+            constellations_opacity: Some(s.overlay.constellations_opacity),
             image_width: rw,
             image_height: rh,
             native_width,

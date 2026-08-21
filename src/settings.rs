@@ -174,6 +174,8 @@ pub struct OverlayLayers {
     pub cardinal: bool,
     pub alt_az_grid: bool,
     pub ra_dec_grid: bool,
+    #[serde(default)]
+    pub constellations: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,8 +202,14 @@ pub struct OverlaySettings {
     pub calibration: LensCalibration,
     pub layers: OverlayLayers,
     pub grid_opacity: f64,
+    #[serde(default = "default_constellations_opacity")]
+    pub constellations_opacity: f64,
     pub text_fields: Vec<OverlayTextField>,
     pub bake_into_saved_frames: bool,
+}
+
+fn default_constellations_opacity() -> f64 {
+    0.55
 }
 
 fn default_true() -> bool {
@@ -313,8 +321,10 @@ impl Default for Settings {
                     cardinal: true,
                     alt_az_grid: true,
                     ra_dec_grid: true,
+                    constellations: false,
                 },
                 grid_opacity: 0.45,
+                constellations_opacity: default_constellations_opacity(),
                 text_fields: vec![
                     OverlayTextField {
                         id: "time".into(),
@@ -374,6 +384,7 @@ impl Settings {
         c.capture_height = c.capture_height.max(2);
 
         self.overlay.grid_opacity = self.overlay.grid_opacity.clamp(0.0, 1.0);
+        self.overlay.constellations_opacity = self.overlay.constellations_opacity.clamp(0.0, 1.0);
         self.image.mask_center_x_px = self.image.mask_center_x_px.clamp(-10_000.0, 10_000.0);
         self.image.mask_center_y_px = self.image.mask_center_y_px.clamp(-10_000.0, 10_000.0);
         self.image.mask_radius_px = self.image.mask_radius_px.clamp(20.0, 10_000.0);
@@ -497,6 +508,7 @@ mod tests {
         assert!(s.image.crop.is_none());
         assert!(s.sensor.enabled);
         assert_eq!(s.overlay.grid_opacity, 0.45);
+        assert_eq!(s.overlay.constellations_opacity, 0.55);
         assert_eq!(s.overlay.calibration.lens_type, LensType::Fisheye);
         assert_eq!(s.overlay.calibration.focal_length_mm, 1.8);
         assert_eq!(s.overlay.calibration.pixel_size_um, 1.12);
@@ -534,6 +546,7 @@ mod tests {
         assert_eq!(v["image"]["crop"], serde_json::Value::Null);
         assert_eq!(v["sensor"]["enabled"], true);
         assert_eq!(v["overlay"]["gridOpacity"], 0.45);
+        assert_eq!(v["overlay"]["constellationsOpacity"], 0.55);
         assert_eq!(v["overlay"]["textFields"][1]["kind"], "exposure");
         assert_eq!(v["overlay"]["calibration"]["lensType"], "fisheye");
         assert_eq!(v["overlay"]["calibration"]["focalLengthMm"], 1.8);
@@ -805,6 +818,7 @@ mod tests {
         s.camera.capture_width = 0;
         s.camera.capture_height = 1;
         s.overlay.grid_opacity = 5.0;
+        s.overlay.constellations_opacity = -5.0;
         s.image.mask_radius_px = 5.0;
         s.image.mask_center_x_px = 99_999.0;
         s.processing.timelapse_fps = 0;
@@ -822,6 +836,7 @@ mod tests {
         assert!(s.camera.target_brightness >= 1.0 && s.camera.target_brightness <= 254.0);
         assert!(s.camera.capture_width >= 8 && s.camera.capture_height >= 2);
         assert!(s.overlay.grid_opacity >= 0.0 && s.overlay.grid_opacity <= 1.0);
+        assert!(s.overlay.constellations_opacity >= 0.0 && s.overlay.constellations_opacity <= 1.0);
         assert_eq!(s.image.mask_radius_px, 20.0);
         assert_eq!(s.image.mask_center_x_px, 10_000.0);
         assert!(s.processing.timelapse_fps >= 1);
@@ -856,6 +871,30 @@ mod tests {
         assert_eq!(cal.pointing_alt_deg, 90.0);
         assert_eq!(cal.pointing_az_deg, 0.0);
         assert_eq!((cal.center_offset_x_px, cal.center_offset_y_px), (0.0, 0.0));
+    }
+
+    #[test]
+    fn old_overlay_layers_without_constellations_default_it_off() {
+        // A config.toml written before the constellations layer existed.
+        let old = "cardinal = true\naltAzGrid = true\nraDecGrid = false\n";
+        let layers: OverlayLayers = toml::from_str(old).unwrap();
+        assert!(layers.cardinal);
+        assert!(layers.alt_az_grid);
+        assert!(!layers.ra_dec_grid);
+        assert!(!layers.constellations);
+    }
+
+    #[test]
+    fn old_overlay_settings_without_constellations_opacity_get_the_documented_default() {
+        // A config.toml written before per-layer constellation opacity existed.
+        let old = "gridOpacity = 0.3\nbakeIntoSavedFrames = false\ntextFields = []\n\
+                    [calibration]\nlensType = \"fisheye\"\nfocalLengthMm = 1.8\n\
+                    pixelSizeUm = 1.12\npointingAzDeg = 0.0\npointingAltDeg = 90.0\n\
+                    rollDeg = 0.0\nflip = false\ncenterOffsetXPx = 0.0\ncenterOffsetYPx = 0.0\n\
+                    [layers]\ncardinal = true\naltAzGrid = true\nraDecGrid = true\n";
+        let overlay: OverlaySettings = toml::from_str(old).unwrap();
+        assert_eq!(overlay.grid_opacity, 0.3);
+        assert_eq!(overlay.constellations_opacity, 0.55);
     }
 
     #[test]

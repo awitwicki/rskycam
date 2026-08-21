@@ -22,7 +22,7 @@ const base = {
   imageWidth: 960,
   imageHeight: 960,
 }
-const none = { cardinal: false, altAzGrid: false, raDecGrid: false }
+const none = { cardinal: false, altAzGrid: false, raDecGrid: false, constellations: false }
 
 describe('buildOverlayGeometry', () => {
   it('returns nothing when all layers are off', () => {
@@ -91,6 +91,16 @@ describe('buildOverlayGeometry', () => {
     expect(g.polylines.every((p) => p.opacity === 0.3)).toBe(true)
   })
 
+  it('stamps constellationsOpacity onto constellation polylines but not their labels', () => {
+    const g = buildOverlayGeometry({
+      ...base, layers: { ...none, constellations: true }, constellationsOpacity: 0.2,
+    })
+    expect(g.polylines.length).toBeGreaterThan(0)
+    expect(g.polylines.every((p) => p.layer === 'constellations' && p.opacity === 0.2)).toBe(true)
+    expect(g.labels.length).toBeGreaterThan(0)
+    expect(g.labels.every((l) => l.layer === 'constellationLabels')).toBe(true)
+  })
+
   it('mask circle culls grid points outside it, but not cardinal labels', () => {
     const layers = { ...none, altAzGrid: true, raDecGrid: true, cardinal: true }
     const mask = { centerXPx: 500, centerYPx: 460, radiusPx: 200 }
@@ -121,6 +131,35 @@ describe('buildOverlayGeometry', () => {
     // alt-0 circle gone; alt 30/60 circles + 8 radials (lowest points culled)
     expect(g.polylines).toHaveLength(10)
   })
+
+  it('constellations layer projects a known constellation (Ursa Minor) and its label', () => {
+    const g = buildOverlayGeometry({ ...base, layers: { ...none, constellations: true } })
+    const lst = lstDeg(base.time, base.location.longitudeDeg)
+    const view = { frameWidth: 960, frameHeight: 960, nativeWidth: 960 }
+    const project = (raDeg: number, decDeg: number) => {
+      const { altDeg, azDeg } = raDecToAltAz(raDeg, decDeg, base.location.latitudeDeg, lst)
+      return altAzToImage(altDeg, azDeg, base.calibration, view)
+    }
+    // Ursa Minor (UMi) from constellations.json — circumpolar at latitude
+    // 50.45 (lowest dec 71.8 > 90 - lat), so every point stays above the
+    // horizon and this renders as a single unsplit 8-point polyline.
+    const umiLine: [number, number][] = [
+      [236.0147, 77.7945], [244.3762, 75.7553], [230.1821, 71.834], [222.6764, 74.1555],
+      [236.0147, 77.7945], [251.4927, 82.0373], [263.0542, 86.5865], [37.9545, 89.2641],
+    ]
+    const expected = umiLine.map(([ra, dec]) => project(ra, dec))
+    const match = g.polylines.find((pl) =>
+      pl.layer === 'constellations' &&
+      pl.points.length === expected.length &&
+      pl.points.every(([x, y], i) => Math.hypot(x - expected[i].x, y - expected[i].y) < 1e-6))
+    expect(match).toBeDefined()
+
+    const labelExpected = project(226.5, 68) // UMi's labelRaDeg/labelDecDeg
+    const label = g.labels.find((l) => l.layer === 'constellationLabels' && l.text === 'Ursa Minor')
+    expect(label).toBeDefined()
+    expect(label!.x).toBeCloseTo(labelExpected.x, 6)
+    expect(label!.y).toBeCloseTo(labelExpected.y, 6)
+  })
 })
 
 describe('raDec horizon reach', () => {
@@ -136,7 +175,7 @@ describe('raDec horizon reach', () => {
         pointingAzDeg: 0, pointingAltDeg: 90, rollDeg: 0, flip: false,
         centerOffsetXPx: 0, centerOffsetYPx: 0,
       },
-      layers: { cardinal: false, altAzGrid: false, raDecGrid: true },
+      layers: { cardinal: false, altAzGrid: false, raDecGrid: true, constellations: false },
       imageWidth: 1280, imageHeight: 960,
     })
     const radii = g.polylines.flatMap((p) => p.points.map(([x, y]) => Math.hypot(x - 640, y - 480)))

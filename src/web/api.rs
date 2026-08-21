@@ -309,6 +309,7 @@ pub struct OverlayRequest {
     pub calibration: Option<LensCalibration>,
     pub layers: Option<OverlayLayers>,
     pub grid_opacity: Option<f64>,
+    pub constellations_opacity: Option<f64>,
     #[serde(default, deserialize_with = "double_option")]
     pub crop: Option<Option<CropRect>>,
 }
@@ -343,6 +344,10 @@ pub async fn post_overlay(
         calibration: &calibration,
         layers: &layers,
         grid_opacity: Some(req.grid_opacity.unwrap_or(s.overlay.grid_opacity)),
+        constellations_opacity: Some(
+            req.constellations_opacity
+                .unwrap_or(s.overlay.constellations_opacity),
+        ),
         image_width: w,
         image_height: h,
         native_width,

@@ -201,6 +201,7 @@ export interface OverlayLayers {
   cardinal: boolean
   altAzGrid: boolean
   raDecGrid: boolean
+  constellations: boolean
 }
 
 export type TextFieldKind = 'time' | 'exposure' | 'sensorTemp'
@@ -217,11 +218,13 @@ export interface OverlaySettings {
   calibration: LensCalibration
   layers: OverlayLayers
   gridOpacity: number // 0..1, applies to altAz/raDec grid lines
+  constellationsOpacity: number // 0..1, applies to constellation lines only
   textFields: OverlayTextField[]
   bakeIntoSavedFrames: boolean
 }
 
-export type OverlayLayerId = 'altAz' | 'raDec' | 'cardinal' | 'text'
+export type OverlayLayerId =
+  | 'altAz' | 'raDec' | 'cardinal' | 'text' | 'constellations' | 'constellationLabels'
 
 export interface OverlayPolyline {
   layer: OverlayLayerId // 'altAz' | 'raDec' | ...
@@ -250,6 +253,7 @@ export interface OverlayRequest {
   calibration?: LensCalibration // override for editor preview
   layers?: OverlayLayers
   gridOpacity?: number // override for editor preview
+  constellationsOpacity?: number // override for editor preview
   crop?: CropRect | null // undefined = settings crop; null = sensor space (uncropped)
 }
 
