@@ -519,6 +519,10 @@ async fn handle_request(
                 }
             }
 
+            // A cold encoder start is a fresh ffmpeg fork+exec plus encoding
+            // the first real captured frame -- measured ~5.7s on Pi hardware
+            // at 1280x960, so 1s was too tight and made a bare `ffprobe`
+            // against a freshly-enabled or just-reconnected stream fail.
             let mut waited = Duration::ZERO;
             let (sps, pps) = loop {
                 let ready = {
@@ -528,7 +532,7 @@ async fn handle_request(
                 if let Some(pair) = ready {
                     break pair;
                 }
-                if waited >= Duration::from_secs(1) {
+                if waited >= Duration::from_secs(8) {
                     return base(RtspStatusCode::ServiceUnavailable).build(Vec::new());
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1021,7 +1025,7 @@ mod tests {
         )
         .await;
         // The fixture encoder needs a beat to spawn and emit its first
-        // access unit; DESCRIBE's own 1s poll loop covers that, but a
+        // access unit; DESCRIBE's own 8s poll loop covers that, but a
         // freshly-bound listener plus process spawn can occasionally need
         // a second attempt on a loaded machine -- retry once before failing.
         let describe = if describe.starts_with("RTSP/1.0 503") {
@@ -1264,12 +1268,16 @@ mod tests {
         let port = wait_for_listening_port(&mut status).await;
         // A DESCRIBE is what actually raises `interest` and wakes the encoder
         // supervisor -- without one the encoder never even tries to spawn.
+        // `interest` is bumped synchronously as soon as the request is parsed,
+        // well before the handler waits on SPS/PPS, so this only needs to
+        // land the request -- reading the response would tie this test's
+        // timing to that wait (now up to 8s) for no reason, since the
+        // response itself is never used.
         let mut client = ClientStream::connect(("127.0.0.1", port)).await.unwrap();
-        let _ = send_and_read(
-            &mut client,
-            "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 1\r\n\r\n",
-        )
-        .await;
+        client
+            .write_all(b"DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+            .await
+            .unwrap();
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let mut saw_error = false;
