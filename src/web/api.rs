@@ -47,6 +47,7 @@ pub struct Status {
     pub camera: Option<crate::capture::CameraCaps>,
     pub darks_progress: Option<crate::darks::DarksProgress>,
     pub focus: FocusInfo,
+    pub rtsp: crate::rtsp::RtspStatus,
 }
 
 fn astro_status(s: &Settings, now: DateTime<Utc>) -> AstroStatus {
@@ -90,6 +91,7 @@ async fn build_status(state: &AppState) -> Status {
             exposure_us: state.focus_shared.exposure_us(),
             gain: state.focus_shared.gain(),
         },
+        rtsp: state.rtsp_status.borrow().clone(),
     }
 }
 
@@ -397,6 +399,52 @@ pub async fn put_settings(State(state): State<AppState>, Json(new): Json<Setting
     StatusCode::NO_CONTENT.into_response()
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RtspCredentialsBody {
+    username: String,
+    password: String,
+}
+
+pub async fn post_rtsp_credentials(
+    State(state): State<AppState>,
+    Json(body): Json<RtspCredentialsBody>,
+) -> Response {
+    let username = body.username.trim().to_string();
+    if username.is_empty() {
+        return (StatusCode::BAD_REQUEST, "username must not be empty").into_response();
+    }
+    let current_username = state.cfg.read().await.rtsp_username.clone();
+    if body.password.is_empty() {
+        if username == current_username {
+            return StatusCode::NO_CONTENT.into_response(); // no-op: nothing changed
+        }
+        return (
+            StatusCode::BAD_REQUEST,
+            "password is required when changing the username",
+        )
+            .into_response();
+    }
+    let ha1 = crate::rtsp::digest::ha1(&username, crate::rtsp::digest::REALM, &body.password);
+
+    let mut candidate = state.cfg.read().await.clone();
+    candidate.rtsp_username = username;
+    candidate.rtsp_password_ha1 = ha1;
+    let store = state.store.clone();
+    let to_save = candidate.clone();
+    let saved = tokio::task::spawn_blocking(move || store.save(&to_save)).await;
+    if !matches!(saved, Ok(Ok(()))) {
+        tracing::error!("persisting RTSP credentials failed");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    // Adopt only our fields so a concurrent settings/password write can't
+    // be clobbered by our (possibly stale) snapshot of the rest of the config.
+    let mut cfg = state.cfg.write().await;
+    cfg.rtsp_username = candidate.rtsp_username;
+    cfg.rtsp_password_ha1 = candidate.rtsp_password_ha1;
+    StatusCode::NO_CONTENT.into_response()
+}
+
 pub async fn start_darks_capture(State(state): State<AppState>) -> Response {
     if state.capture_status.borrow().state == crate::capture::CaptureState::CameraUnavailable {
         return (
@@ -540,6 +588,25 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::web::testing::{harness, login_cookie};
+
+    fn req(
+        method: &str,
+        uri: &str,
+        cookie: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Request<Body> {
+        let mut b = Request::builder().method(method).uri(uri);
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c);
+        }
+        match body {
+            Some(v) => b
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(v.to_string()))
+                .unwrap(),
+            None => b.body(Body::empty()).unwrap(),
+        }
+    }
 
     async fn get_json(app: &axum::Router, cookie: &str, uri: &str) -> serde_json::Value {
         let res = app
@@ -1339,5 +1406,74 @@ mod tests {
         .await
         .expect("no status event within 10s");
         assert!(!text.contains("event: focus"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn rtsp_credentials_update_persists_and_get_settings_never_returns_them() {
+        let h = harness();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let res = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/rtsp/credentials",
+                Some(&cookie),
+                Some(serde_json::json!({"username": "camuser", "password": "streampass"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(h.state.cfg.read().await.rtsp_username, "camuser");
+        assert_eq!(
+            h.state.cfg.read().await.rtsp_password_ha1,
+            crate::rtsp::digest::ha1("camuser", crate::rtsp::digest::REALM, "streampass")
+        );
+
+        let settings_res = app
+            .oneshot(req("GET", "/api/settings", Some(&cookie), None))
+            .await
+            .unwrap();
+        let body = http_body_util::BodyExt::collect(settings_res.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("streampass"));
+        assert!(!text.contains("rtspPasswordHa1"));
+    }
+
+    #[tokio::test]
+    async fn rtsp_credentials_blank_password_is_a_noop_for_the_same_username() {
+        let h = harness();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let res = app
+            .oneshot(req(
+                "POST",
+                "/api/rtsp/credentials",
+                Some(&cookie),
+                Some(serde_json::json!({"username": "admin", "password": ""})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn rtsp_credentials_blank_password_with_new_username_is_rejected() {
+        let h = harness();
+        let app = crate::web::router(h.state.clone());
+        let cookie = login_cookie(&app).await;
+        let res = app
+            .oneshot(req(
+                "POST",
+                "/api/rtsp/credentials",
+                Some(&cookie),
+                Some(serde_json::json!({"username": "someone-else", "password": ""})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 }

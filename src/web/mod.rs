@@ -192,6 +192,7 @@ mod tests {
 pub fn router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/api/change-password", post(auth_layer::change_password))
+        .route("/api/rtsp/credentials", post(api::post_rtsp_credentials))
         .route("/api/logout", post(auth_layer::logout))
         .route("/api/status", get(api::get_status))
         .route("/api/latest.jpg", get(api::latest_jpg))
