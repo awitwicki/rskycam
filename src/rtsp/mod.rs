@@ -108,10 +108,98 @@ pub fn spawn_rtsp(
         status_tx,
     });
 
-    tokio::spawn(listener_task(cfg, shared));
-    let _ = (latest, ffmpeg); // wired up by Task 9's encoder supervisor
+    tokio::spawn(listener_task(cfg.clone(), shared.clone()));
+    tokio::spawn(encoder_supervisor_task(cfg, latest, ffmpeg, shared));
 
     RtspHandle { status: status_rx }
+}
+
+/// Runs the encoder for as long as anything is interested in it (see
+/// `Shared::interest`), restarting it with exponential backoff when it dies
+/// unexpectedly and stopping it (no backoff, no recorded error) once the
+/// last interested connection has been gone for `IDLE_STOP_AFTER`.
+async fn encoder_supervisor_task(
+    cfg: Arc<RwLock<ConfigFile>>,
+    latest: watch::Receiver<Option<Arc<LatestFrame>>>,
+    ffmpeg: PathBuf,
+    shared: Arc<Shared>,
+) {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        wait_until_wanted(&shared).await;
+        publish_status(&shared, |s| s.encoding = true);
+
+        let stop = Arc::new(Notify::new());
+        let watcher = tokio::spawn(watch_for_idle_and_stop(shared.clone(), stop.clone()));
+
+        let enc_cfg = {
+            let c = cfg.read().await;
+            encoder::EncoderConfig {
+                ffmpeg: ffmpeg.clone(),
+                fps: c.settings.rtsp.fps.max(1),
+                output_width: c.settings.rtsp.output_width,
+                bitrate_kbps: c.settings.rtsp.bitrate_kbps,
+                extra_args: c.settings.rtsp.extra_args.clone(),
+            }
+        };
+        let result = tokio::select! {
+            r = encoder::run_encoder(&enc_cfg, latest.clone(), &shared) => r,
+            _ = stop.notified() => Ok(()), // deliberate idle stop, not an error
+        };
+        watcher.abort();
+        publish_status(&shared, |s| s.encoding = false);
+        // The parameter sets belong to the process that just exited: a fresh
+        // ffmpeg emits its own, and a DESCRIBE answered from stale ones would
+        // hand a client an SDP that doesn't match the stream it then gets.
+        {
+            let mut s = shared.stream.lock().unwrap();
+            s.sps = None;
+            s.pps = None;
+        }
+
+        if shared.interest.load(Ordering::SeqCst) == 0 {
+            // Idle stop (or a death that raced with the last client leaving):
+            // nothing went wrong, so don't record an error or grow the backoff.
+            backoff = Duration::from_secs(1);
+            continue;
+        }
+        match result {
+            Ok(()) => backoff = Duration::from_secs(1),
+            Err(e) => {
+                publish_status(&shared, |s| s.last_error = Some(format!("encoder: {e}")));
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+            }
+        }
+    }
+}
+
+/// Parks until at least one connection has expressed interest. `Notify`
+/// stores a permit when nobody is waiting, so a `DESCRIBE` that lands between
+/// the load and the `await` still wakes this up rather than being lost.
+async fn wait_until_wanted(shared: &Shared) {
+    loop {
+        if shared.interest.load(Ordering::SeqCst) > 0 {
+            return;
+        }
+        shared.want_encoder.notified().await;
+    }
+}
+
+/// Notifies `stop` once interest has stayed at zero for `IDLE_STOP_AFTER`,
+/// so a client that reconnects promptly keeps the same running encoder
+/// instead of paying for a fresh ffmpeg start.
+async fn watch_for_idle_and_stop(shared: Arc<Shared>, stop: Arc<Notify>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if shared.interest.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(IDLE_STOP_AFTER).await;
+            if shared.interest.load(Ordering::SeqCst) == 0 {
+                stop.notify_one();
+                return;
+            }
+        }
+    }
 }
 
 async fn listener_task(cfg: Arc<RwLock<ConfigFile>>, shared: Arc<Shared>) {
@@ -280,7 +368,6 @@ async fn handle_request(
     out_tx: &mpsc::Sender<Bytes>,
     state: &mut ConnState,
 ) -> rtsp_types::Response<Vec<u8>> {
-    let _ = out_tx; // Task 10's PLAY handler writes interleaved RTP through it
     let cseq = req
         .header(&headers::CSEQ)
         .map(|v| v.as_str().to_string())
@@ -375,9 +462,96 @@ async fn handle_request(
                 .build(body.into_bytes())
         }
 
+        Method::Setup => {
+            let auth_enabled = cfg.read().await.settings.rtsp.auth_enabled;
+            if auth_enabled && !state.authenticated {
+                return base(RtspStatusCode::Unauthorized).build(Vec::new());
+            }
+            let transport = req
+                .header(&headers::TRANSPORT)
+                .map(|v| v.as_str().to_string())
+                .unwrap_or_default();
+            if !transport.contains("TCP") {
+                return base(RtspStatusCode::UnsupportedTransport).build(Vec::new());
+            }
+            let session_id = new_random_token();
+            state.session = Some(session_id.clone());
+            base(RtspStatusCode::Ok)
+                .reason_phrase("OK")
+                .header(headers::TRANSPORT, "RTP/AVP/TCP;unicast;interleaved=0-1")
+                .header(headers::SESSION, session_id)
+                .build(Vec::new())
+        }
+
+        Method::Play => {
+            if state.session.is_none() {
+                return base(RtspStatusCode::MethodNotValidInThisState).build(Vec::new());
+            }
+            // A repeated PLAY on a session that is already playing must not
+            // take a *second* slot out of the 4-client cap: the teardown and
+            // disconnect paths only ever hand one back, so the counter would
+            // leak upward permanently and eventually refuse every client.
+            if !state.playing {
+                if shared.clients.load(Ordering::SeqCst) >= MAX_CLIENTS {
+                    return base(RtspStatusCode::NotEnoughBandwidth).build(Vec::new());
+                }
+                shared.clients.fetch_add(1, Ordering::SeqCst);
+                publish_client_count(shared);
+                state.playing = true;
+            }
+            // Likewise, never leave an older forwarding task alive alongside
+            // the new one -- it would duplicate every RTP packet on the wire.
+            if let Some(task) = state.play_task.take() {
+                task.abort();
+            }
+            let mut rx = shared.tx.subscribe();
+            let out_tx = out_tx.clone();
+            state.play_task = Some(tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(frame) => {
+                            if out_tx.send(frame).await.is_err() {
+                                break;
+                            }
+                        }
+                        // A lagging subscriber only drops old broadcast values for
+                        // itself -- it never blocks the encoder or other sessions
+                        // (the encoder's send() to the broadcast channel doesn't
+                        // wait on slow receivers), so skipping ahead and resuming
+                        // from the latest frame is enough; no need to also tear
+                        // down the RTSP session over it.
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }));
+            base(RtspStatusCode::Ok)
+                .reason_phrase("OK")
+                .header(headers::SESSION, state.session.clone().unwrap_or_default())
+                .build(Vec::new())
+        }
+
+        Method::Teardown => {
+            if let Some(task) = state.play_task.take() {
+                task.abort();
+            }
+            if state.playing {
+                shared.clients.fetch_sub(1, Ordering::SeqCst);
+                publish_client_count(shared);
+                state.playing = false;
+            }
+            base(RtspStatusCode::Ok)
+                .reason_phrase("OK")
+                .build(Vec::new())
+        }
+
+        Method::GetParameter => base(RtspStatusCode::Ok)
+            .reason_phrase("OK")
+            .build(Vec::new()),
+
         _ => base(RtspStatusCode::MethodNotAllowed)
             .reason_phrase("Method Not Allowed")
-            .build(Vec::new()), // SETUP/PLAY/TEARDOWN/GET_PARAMETER added in Task 10
+            .build(Vec::new()),
     }
 }
 
@@ -544,5 +718,400 @@ mod tests {
         assert!(authed.starts_with("RTSP/1.0 200 OK\r\n"));
         assert!(authed.contains("Content-Type: application/sdp\r\n"));
         assert!(authed.contains("m=video 0 RTP/AVP 96"));
+    }
+
+    fn fixture_ffmpeg_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-ffmpeg-h264")
+    }
+
+    /// Blocks until `spawn_rtsp`'s listener has bound, and reports the port
+    /// it settled on (these tests configure port 0, so the OS picks one).
+    async fn wait_for_listening_port(status: &mut watch::Receiver<RtspStatus>) -> u16 {
+        loop {
+            status.changed().await.unwrap();
+            let s = status.borrow().clone();
+            if s.listening {
+                return s.port;
+            }
+        }
+    }
+
+    /// Parses zero or more complete `$ channel len[u16 BE] payload`
+    /// interleaved frames starting at the first `$` found in `data`
+    /// (skipping the leading plain-text RTSP response that precedes them
+    /// on the same socket). Returns `None` only when no `$` has arrived at
+    /// all yet; once the first one is seen it returns however many
+    /// complete frames are present so far -- an empty `Vec` if even that
+    /// first frame is still incomplete.
+    fn parse_interleaved_frames(data: &[u8]) -> Option<Vec<(u8, Vec<u8>)>> {
+        let start = data.iter().position(|&b| b == b'$')?;
+        let mut frames = Vec::new();
+        let mut i = start;
+        while i + 4 <= data.len() {
+            if data[i] != b'$' {
+                break;
+            }
+            let channel = data[i + 1];
+            let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+            if i + 4 + len > data.len() {
+                break; // this frame hasn't fully arrived yet
+            }
+            frames.push((channel, data[i + 4..i + 4 + len].to_vec()));
+            i += 4 + len;
+        }
+        Some(frames)
+    }
+
+    #[tokio::test]
+    async fn full_session_lifecycle_over_a_real_socket() {
+        let cfg = test_cfg();
+        {
+            let mut c = cfg.write().await;
+            c.settings.rtsp.auth_enabled = false; // isolate lifecycle from the auth path (covered separately)
+        }
+        let (_latest_tx, latest_rx) = watch::channel(None);
+        let handle = spawn_rtsp(cfg.clone(), latest_rx, fixture_ffmpeg_path());
+        // Binding our own listener isn't possible here since `spawn_rtsp`
+        // owns the bind -- instead read back the port it settled on.
+        let mut status = handle.status;
+        let port = wait_for_listening_port(&mut status).await;
+
+        let mut client = ClientStream::connect(("127.0.0.1", port)).await.unwrap();
+        let describe = send_and_read(
+            &mut client,
+            "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 1\r\n\r\n",
+        )
+        .await;
+        // The fixture encoder needs a beat to spawn and emit its first
+        // access unit; DESCRIBE's own 1s poll loop covers that, but a
+        // freshly-bound listener plus process spawn can occasionally need
+        // a second attempt on a loaded machine -- retry once before failing.
+        let describe = if describe.starts_with("RTSP/1.0 503") {
+            send_and_read(
+                &mut client,
+                "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 2\r\n\r\n",
+            )
+            .await
+        } else {
+            describe
+        };
+        assert!(describe.starts_with("RTSP/1.0 200 OK\r\n"), "{describe}");
+
+        let setup = send_and_read(
+            &mut client,
+            "SETUP rtsp://127.0.0.1/allsky/streamid=0 RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
+        )
+        .await;
+        assert!(setup.starts_with("RTSP/1.0 200 OK\r\n"), "{setup}");
+        assert!(setup.contains("interleaved=0-1"));
+
+        client
+            .write_all(b"PLAY rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 4\r\n\r\n")
+            .await
+            .unwrap();
+        // PLAY's own response and the interleaved RTP frames that follow it
+        // both arrive on the same socket -- collect at least two full
+        // interleaved frames (a single access unit already packetizes to
+        // 3: SPS, PPS, IDR) so payload type and sequence progression can be
+        // checked directly, the way a real client would see them.
+        let mut collected = Vec::new();
+        let frames = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = client.read(&mut buf).await.unwrap();
+                assert!(n > 0, "server closed the connection during PLAY");
+                collected.extend_from_slice(&buf[..n]);
+                if let Some(frames) = parse_interleaved_frames(&collected) {
+                    if frames.len() >= 2 {
+                        return frames;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for two interleaved RTP frames");
+        assert!(collected.starts_with(b"RTSP/1.0 200 OK\r\n"));
+        for (channel, rtp) in &frames {
+            assert_eq!(*channel, 0);
+            assert_eq!(rtp[1] & 0x7f, 96); // payload type 96, marker bit masked off
+        }
+        let seq0 = u16::from_be_bytes([frames[0].1[2], frames[0].1[3]]);
+        let seq1 = u16::from_be_bytes([frames[1].1[2], frames[1].1[3]]);
+        assert_eq!(seq1, seq0.wrapping_add(1));
+        assert_eq!(status.borrow().clients, 1);
+
+        client
+            .write_all(b"TEARDOWN rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 5\r\n\r\n")
+            .await
+            .unwrap();
+        // RTP frames already queued behind the writer keep arriving until
+        // the TEARDOWN response catches up with them, so scan the stream for
+        // the status line rather than assuming it is the very next read.
+        let needle: &[u8] = b"RTSP/1.0 200 OK\r\n";
+        let mut tail = Vec::new();
+        let saw_ok = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = client.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    return false; // closed without ever answering
+                }
+                tail.extend_from_slice(&buf[..n]);
+                if tail.windows(needle.len()).any(|w| w == needle) {
+                    return true;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for the TEARDOWN response");
+        assert!(saw_ok, "connection closed before the TEARDOWN response");
+        // TEARDOWN gives the client slot back exactly once.
+        assert_eq!(status.borrow().clients, 0);
+    }
+
+    #[tokio::test]
+    async fn udp_setup_is_rejected_and_a_fifth_client_is_capped() {
+        let cfg = test_cfg();
+        {
+            let mut c = cfg.write().await;
+            c.settings.rtsp.auth_enabled = false;
+        }
+        let (_latest_tx, latest_rx) = watch::channel(None);
+        let handle = spawn_rtsp(cfg, latest_rx, fixture_ffmpeg_path());
+        let mut status = handle.status;
+        let port = wait_for_listening_port(&mut status).await;
+
+        let mut udp_client = ClientStream::connect(("127.0.0.1", port)).await.unwrap();
+        let setup_udp = send_and_read(
+            &mut udp_client,
+            "SETUP rtsp://127.0.0.1/allsky/streamid=0 RTSP/1.0\r\nCSeq: 1\r\nTransport: RTP/AVP;unicast;client_port=5000-5001\r\n\r\n",
+        )
+        .await;
+        assert!(setup_udp.starts_with("RTSP/1.0 461"), "{setup_udp}");
+
+        // Wait for the encoder to be ready, then fill all 4 client slots and
+        // confirm a 5th is refused.
+        for _ in 0..2 {
+            let _ = send_and_read(
+                &mut udp_client,
+                "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 2\r\n\r\n",
+            )
+            .await;
+        }
+        let mut clients = Vec::new();
+        for i in 0..4 {
+            let mut c = ClientStream::connect(("127.0.0.1", port)).await.unwrap();
+            let _ = send_and_read(
+                &mut c,
+                &format!("DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: {i}\r\n\r\n"),
+            )
+            .await;
+            let _ = send_and_read(
+                &mut c,
+                &format!(
+                    "SETUP rtsp://127.0.0.1/allsky/streamid=0 RTSP/1.0\r\nCSeq: {i}\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n"
+                ),
+            )
+            .await;
+            let play = send_and_read(
+                &mut c,
+                &format!("PLAY rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: {i}\r\n\r\n"),
+            )
+            .await;
+            assert!(
+                play.starts_with("RTSP/1.0 200 OK\r\n"),
+                "client {i}: {play}"
+            );
+            clients.push(c);
+        }
+        let mut fifth = ClientStream::connect(("127.0.0.1", port)).await.unwrap();
+        let _ = send_and_read(
+            &mut fifth,
+            "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 9\r\n\r\n",
+        )
+        .await;
+        let _ = send_and_read(
+            &mut fifth,
+            "SETUP rtsp://127.0.0.1/allsky/streamid=0 RTSP/1.0\r\nCSeq: 9\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
+        )
+        .await;
+        let fifth_play = send_and_read(
+            &mut fifth,
+            "PLAY rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 9\r\n\r\n",
+        )
+        .await;
+        assert!(fifth_play.starts_with("RTSP/1.0 453"), "{fifth_play}");
+        assert_eq!(status.borrow().clients, MAX_CLIENTS);
+    }
+
+    #[tokio::test]
+    async fn wrong_password_is_rejected_with_401() {
+        let cfg = test_cfg();
+        {
+            let mut c = cfg.write().await;
+            c.settings.rtsp.auth_enabled = true;
+        }
+        let (_latest_tx, latest_rx) = watch::channel(None);
+        let handle = spawn_rtsp(cfg, latest_rx, fixture_ffmpeg_path());
+        let mut status = handle.status;
+        let port = wait_for_listening_port(&mut status).await;
+        let mut client = ClientStream::connect(("127.0.0.1", port)).await.unwrap();
+        let unauth = send_and_read(
+            &mut client,
+            "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 1\r\n\r\n",
+        )
+        .await;
+        assert!(unauth.starts_with("RTSP/1.0 401"), "{unauth}");
+        let nonce = unauth
+            .lines()
+            .find(|l| l.starts_with("WWW-Authenticate:"))
+            .unwrap()
+            .split("nonce=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_string();
+        let bad_response = digest::expected_response(
+            "0000000000000000000000000000000", // wrong HA1
+            &nonce,
+            "00000001",
+            "abc",
+            "auth",
+            "DESCRIBE",
+            "rtsp://127.0.0.1/allsky",
+        );
+        let auth_header = format!(
+            "Digest username=\"admin\", realm=\"rskycam\", nonce=\"{nonce}\", uri=\"rtsp://127.0.0.1/allsky\", response=\"{bad_response}\", nc=00000001, cnonce=\"abc\", qop=auth"
+        );
+        let still_unauth = send_and_read(
+            &mut client,
+            &format!(
+                "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 2\r\nAuthorization: {auth_header}\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(still_unauth.starts_with("RTSP/1.0 401"), "{still_unauth}");
+        // And a client can't sidestep the challenge by jumping straight to
+        // SETUP: without an authenticated connection it is refused too.
+        let setup = send_and_read(
+            &mut client,
+            "SETUP rtsp://127.0.0.1/allsky/streamid=0 RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
+        )
+        .await;
+        assert!(setup.starts_with("RTSP/1.0 401"), "{setup}");
+    }
+
+    #[tokio::test]
+    async fn encoder_crash_is_recovered_with_backoff() {
+        let cfg = test_cfg();
+        {
+            let mut c = cfg.write().await;
+            c.settings.rtsp.auth_enabled = false;
+        }
+        let (_latest_tx, latest_rx) = watch::channel(None);
+        // An encoder binary that can't be executed at all is the simplest
+        // deterministic "crash": `nice` reports 127 and `run_encoder` turns
+        // that into an `Err`, exactly like a mid-run ffmpeg failure would.
+        // (Deliberately *not* the fixture's `fake-ffmpeg-h264-fail` marker:
+        // that one is keyed off the process-wide cwd, and mutating the cwd
+        // here would make every other test's encoder fixture fail too.)
+        let handle = spawn_rtsp(
+            cfg,
+            latest_rx,
+            PathBuf::from("/nonexistent/rskycam-no-such-ffmpeg"),
+        );
+        let mut status = handle.status;
+        let port = wait_for_listening_port(&mut status).await;
+        // A DESCRIBE is what actually raises `interest` and wakes the encoder
+        // supervisor -- without one the encoder never even tries to spawn.
+        let mut client = ClientStream::connect(("127.0.0.1", port)).await.unwrap();
+        let _ = send_and_read(
+            &mut client,
+            "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 1\r\n\r\n",
+        )
+        .await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut saw_error = false;
+        while tokio::time::Instant::now() < deadline {
+            if status.borrow().last_error.is_some() {
+                saw_error = true;
+                break;
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(200), status.changed()).await;
+        }
+        assert!(
+            saw_error,
+            "expected a recorded encoder error after a simulated crash"
+        );
+        let recorded = status.borrow().last_error.clone().unwrap();
+        assert!(recorded.starts_with("encoder: "), "{recorded}");
+
+        // The supervisor keeps retrying instead of wedging: every retry cycle
+        // republishes status (encoding on, encoding off, error again), so a
+        // continuing trickle of updates is what "recovered with backoff"
+        // looks like from the outside. With a 1s then 2s backoff there are
+        // two more cycles inside this window, six updates in all.
+        let mut updates = 0;
+        let watch_until = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < watch_until {
+            if tokio::time::timeout(Duration::from_millis(250), status.changed())
+                .await
+                .is_ok()
+            {
+                updates += 1;
+            }
+        }
+        assert!(
+            updates >= 3,
+            "supervisor stopped retrying after the first failure ({updates} status updates)"
+        );
+    }
+
+    /// The point of the whole `interest` mechanism: once the last connection
+    /// that asked for the stream is gone, the supervisor must park instead of
+    /// respawning ffmpeg forever on an idle Pi.
+    ///
+    /// Note this exercises the "encoder exited while nothing wants it" park at
+    /// the top of the supervisor's post-run block, *not* the 10s
+    /// `watch_for_idle_and_stop` debounce: the fixture encoder self-terminates
+    /// after ~1s, so the park is always reached first. The debounce only
+    /// matters for a real, long-running ffmpeg.
+    #[tokio::test]
+    async fn encoder_stops_once_the_last_interested_client_disconnects() {
+        let cfg = test_cfg();
+        {
+            let mut c = cfg.write().await;
+            c.settings.rtsp.auth_enabled = false;
+        }
+        let (_latest_tx, latest_rx) = watch::channel(None);
+        let handle = spawn_rtsp(cfg, latest_rx, fixture_ffmpeg_path());
+        let mut status = handle.status;
+        let port = wait_for_listening_port(&mut status).await;
+
+        let mut client = ClientStream::connect(("127.0.0.1", port)).await.unwrap();
+        let _ = send_and_read(
+            &mut client,
+            "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 1\r\n\r\n",
+        )
+        .await;
+        drop(client); // interest drops back to 0
+
+        // "Settled" = a stretch with no status updates at all that ends with
+        // `encoding` false; a supervisor still cycling the fixture would keep
+        // publishing every second and never produce such a stretch.
+        let settled = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let quiet = tokio::time::timeout(Duration::from_secs(3), status.changed()).await;
+                if quiet.is_err() {
+                    return !status.borrow().encoding;
+                }
+            }
+        })
+        .await
+        .expect("supervisor never went quiet after the last client left");
+        assert!(settled, "encoder was left running with nothing interested");
     }
 }
