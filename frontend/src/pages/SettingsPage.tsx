@@ -26,7 +26,10 @@ export default function SettingsPage() {
   const [oldPw, setOldPw] = useState('')
   const [newPw, setNewPw] = useState('')
   const [pwMessage, setPwMessage] = useState<{ ok: boolean; text: string } | null>(null)
-  const [rtspUser, setRtspUser] = useState('admin')
+  // null = "not edited yet", so the field tracks the live username from
+  // status instead of pinning a hardcoded 'admin' that a password-only save
+  // would then write back over whatever the user had actually configured.
+  const [rtspUser, setRtspUser] = useState<string | null>(null)
   const [rtspPw, setRtspPw] = useState('')
   const [rtspMessage, setRtspMessage] = useState<{ ok: boolean; text: string } | null>(null)
   const [error, setError] = useState('')
@@ -89,8 +92,10 @@ export default function SettingsPage() {
     }
   }
 
+  const rtspUsername = rtspUser ?? status?.rtsp.username ?? 'admin'
+
   const saveRtspCredentials = async () => {
-    const ok = await getApi().setRtspCredentials(rtspUser, rtspPw)
+    const ok = await getApi().setRtspCredentials(rtspUsername, rtspPw)
     setRtspMessage(ok
       ? { ok: true, text: 'Stream credentials updated.' }
       : { ok: false, text: 'Could not update stream credentials.' })
@@ -413,17 +418,24 @@ export default function SettingsPage() {
           <p className="text-xs text-fgdim">
             {status?.rtsp.listening
               ? `Listening · ${status.rtsp.clients} client${status.rtsp.clients === 1 ? '' : 's'} · ${status.rtsp.encoding ? 'encoding' : 'idle'}`
-              : status?.rtsp.lastError ?? 'Not listening'}
+              : 'Not listening'}
           </p>
+          {/* Rendered independently of `listening`: an encoder failure while
+              the listener is happily bound would otherwise never surface. */}
+          {status?.rtsp.lastError && (
+            <p className="text-xs text-danger">{status.rtsp.lastError}</p>
+          )}
 
           <div className="flex flex-col gap-3 border-t border-line pt-3">
-            <Input label="Stream username" value={rtspUser} onChange={setRtspUser} />
+            <Input label="Stream username" value={rtspUsername} onChange={setRtspUser} />
             <Input label="Stream password" type="password" value={rtspPw} onChange={setRtspPw}
               autoComplete="new-password" />
             {rtspMessage && (
               <p className={`text-sm ${rtspMessage.ok ? 'text-ok' : 'text-danger'}`}>{rtspMessage.text}</p>
             )}
-            <Button variant="ghost" onClick={saveRtspCredentials} disabled={!rtspUser}>
+            {/* An empty password is a server-side no-op for the same username,
+                so leaving the button live would report success for nothing. */}
+            <Button variant="ghost" onClick={saveRtspCredentials} disabled={!rtspUsername || !rtspPw}>
               Save credentials
             </Button>
           </div>

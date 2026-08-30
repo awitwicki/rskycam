@@ -1,7 +1,5 @@
 // Annex-B H.264 -> RTP (RFC 6184), single-NAL or FU-A, RTP-over-TCP interleaved framing.
 
-#![allow(dead_code)] // Public API used by later tasks (encoder, session handler)
-
 use bytes::{BufMut, Bytes, BytesMut};
 
 const PAYLOAD_TYPE: u8 = 96;

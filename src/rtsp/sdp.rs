@@ -6,7 +6,6 @@ use base64::Engine;
 /// Builds the DESCRIBE response body from the encoder's SPS/PPS NALs
 /// (payload only, no start code) and the RTP payload type / clock rate this
 /// server always uses (96 / 90000).
-#[allow(dead_code)]
 pub fn build(sps: &[u8], pps: &[u8], path: &str) -> String {
     let sprop = format!("{},{}", BASE64.encode(sps), BASE64.encode(pps));
     let profile_level_id = if sps.len() >= 4 {

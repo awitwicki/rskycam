@@ -63,10 +63,40 @@ struct Shared {
     clients: AtomicUsize,
     want_encoder: Notify,
     status_tx: watch::Sender<RtspStatus>,
+    /// Mirrors `settings.rtsp.enabled`, published by `listener_task` (which
+    /// is the only thing that reads the setting). Flipping it to `false`
+    /// tears down every live connection and stops the encoder; dropping the
+    /// listener alone would leave already-connected sessions streaming.
+    /// Starts `false` so nothing runs before the listener has looked at the
+    /// config -- no connection can exist before it binds, and it only binds
+    /// after publishing `true`.
+    enabled: watch::Sender<bool>,
+}
+
+/// Resolves once `enabled` has been observed as `false` (immediately if it
+/// already is). The borrow guard `wait_for` hands back is dropped at the end
+/// of this statement, never held across the caller's `.await`.
+async fn wait_until_disabled(rx: &mut watch::Receiver<bool>) {
+    let _ = rx.wait_for(|enabled| !*enabled).await;
 }
 
 fn publish_status(shared: &Shared, edit: impl FnOnce(&mut RtspStatus)) {
     shared.status_tx.send_modify(edit);
+}
+
+/// `publish_status` uses `send_modify`, which notifies watchers whether or
+/// not anything actually changed. The username republish below runs on the
+/// listener's 2s recheck, so it needs the change-gated form -- otherwise the
+/// status channel would tick every 2s forever, waking every watcher and
+/// destroying any "has the server gone quiet" signal.
+fn publish_username(shared: &Shared, username: String) {
+    shared.status_tx.send_if_modified(|s| {
+        if s.username == username {
+            return false;
+        }
+        s.username = username;
+        true
+    });
 }
 
 fn publish_client_count(shared: &Shared) {
@@ -101,6 +131,7 @@ pub fn spawn_rtsp(
         clients: AtomicUsize::new(0),
         want_encoder: Notify::new(),
         status_tx,
+        enabled: watch::channel(false).0,
     });
 
     tokio::spawn(listener_task(cfg.clone(), shared.clone()));
@@ -120,8 +151,9 @@ async fn encoder_supervisor_task(
     shared: Arc<Shared>,
 ) {
     let mut backoff = Duration::from_secs(1);
+    let mut enabled_rx = shared.enabled.subscribe();
     loop {
-        wait_until_wanted(&shared).await;
+        wait_until_wanted(&shared, &mut enabled_rx).await;
         publish_status(&shared, |s| s.encoding = true);
 
         let stop = Arc::new(Notify::new());
@@ -140,6 +172,10 @@ async fn encoder_supervisor_task(
         let result = tokio::select! {
             r = encoder::run_encoder(&enc_cfg, latest.clone(), &shared) => r,
             _ = stop.notified() => Ok(()), // deliberate idle stop, not an error
+            // `rtsp.enabled` turned off: the connections are being torn down
+            // in parallel, so drop the encoder future now (kill_on_drop takes
+            // ffmpeg with it) rather than waiting out the idle debounce.
+            _ = wait_until_disabled(&mut enabled_rx) => Ok(()),
         };
         watcher.abort();
         publish_status(&shared, |s| s.encoding = false);
@@ -159,8 +195,17 @@ async fn encoder_supervisor_task(
             continue;
         }
         match result {
-            Ok(()) => backoff = Duration::from_secs(1),
+            Ok(()) => {
+                backoff = Duration::from_secs(1);
+                // A clean exit while something still wants the stream would
+                // otherwise respawn as fast as fork+exec allows. `extra_args`
+                // is user-editable, and a combination that makes ffmpeg exit 0
+                // promptly is entirely reachable -- pace the retry the same way
+                // the failure path's first step does.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             Err(e) => {
+                tracing::error!("rtsp encoder failed: {e}");
                 publish_status(&shared, |s| s.last_error = Some(format!("encoder: {e}")));
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -169,15 +214,21 @@ async fn encoder_supervisor_task(
     }
 }
 
-/// Parks until at least one connection has expressed interest. `Notify`
-/// stores a permit when nobody is waiting, so a `DESCRIBE` that lands between
-/// the load and the `await` still wakes this up rather than being lost.
-async fn wait_until_wanted(shared: &Shared) {
+/// Parks until RTSP is enabled *and* at least one connection has expressed
+/// interest. `Notify` stores a permit when nobody is waiting, so a `DESCRIBE`
+/// that lands between the load and the `await` still wakes this up rather
+/// than being lost, and a dropped `Notified` hands its wakeup on rather than
+/// swallowing it -- so losing the `select!` race below never loses a permit.
+async fn wait_until_wanted(shared: &Shared, enabled_rx: &mut watch::Receiver<bool>) {
     loop {
-        if shared.interest.load(Ordering::SeqCst) > 0 {
+        let enabled = *enabled_rx.borrow(); // guard dropped before the awaits below
+        if enabled && shared.interest.load(Ordering::SeqCst) > 0 {
             return;
         }
-        shared.want_encoder.notified().await;
+        tokio::select! {
+            _ = shared.want_encoder.notified() => {}
+            _ = enabled_rx.changed() => {}
+        }
     }
 }
 
@@ -215,6 +266,12 @@ async fn listener_task(cfg: Arc<RwLock<ConfigFile>>, shared: Arc<Shared>) {
                 s.listening = false;
             }
         });
+        // Published *before* the bind below, so every connection this listener
+        // goes on to accept observes `true` and none is torn down by the
+        // disable path the instant it connects after a re-enable.
+        shared
+            .enabled
+            .send_if_modified(|v| std::mem::replace(v, enabled) != enabled);
         if !enabled {
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
@@ -223,6 +280,7 @@ async fn listener_task(cfg: Arc<RwLock<ConfigFile>>, shared: Arc<Shared>) {
         let listener = match TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
+                tracing::warn!("rtsp: binding :{port} failed: {e}; retrying in 10s");
                 publish_status(&shared, |s| {
                     s.listening = false;
                     s.last_error = Some(format!("binding :{port}: {e}"));
@@ -246,6 +304,10 @@ async fn listener_task(cfg: Arc<RwLock<ConfigFile>>, shared: Arc<Shared>) {
             tokio::select! {
                 accepted = listener.accept() => {
                     let Ok((stream, _peer)) = accepted else { continue };
+                    // RTP is interleaved on this same control connection, so
+                    // Nagle would coalesce (and delay) the small RTP writes.
+                    // Advisory: an OS that refuses it just costs latency.
+                    let _ = stream.set_nodelay(true);
                     let cfg = cfg.clone();
                     let shared = shared.clone();
                     tokio::spawn(async move {
@@ -253,8 +315,24 @@ async fn listener_task(cfg: Arc<RwLock<ConfigFile>>, shared: Arc<Shared>) {
                     });
                 }
                 _ = recheck.tick() => {
-                    let c = cfg.read().await;
-                    if !c.settings.rtsp.enabled || c.settings.rtsp.port != port {
+                    let (still_enabled, cfg_port, username) = {
+                        let c = cfg.read().await;
+                        (
+                            c.settings.rtsp.enabled,
+                            c.settings.rtsp.port,
+                            c.rtsp_username.clone(),
+                        )
+                    };
+                    // The Settings page builds its copyable rtsp:// URL from
+                    // this; without republishing here it would show the old
+                    // username until the listener happened to rebind.
+                    publish_username(&shared, username);
+                    // Tears down live sessions and the encoder; the listener
+                    // itself is dropped by breaking out of this loop.
+                    shared
+                        .enabled
+                        .send_if_modified(|v| std::mem::replace(v, still_enabled) != still_enabled);
+                    if !still_enabled || cfg_port != port {
                         break; // settings changed -- drop this listener and rebind above
                     }
                 }
@@ -293,6 +371,7 @@ async fn handle_connection(
     let mut buf: Vec<u8> = Vec::new();
     let mut read_buf = [0u8; 4096];
     let mut state = ConnState::default();
+    let mut enabled_rx = shared.enabled.subscribe();
 
     let result = 'outer: loop {
         // Before PLAY, a client that vanishes without a clean TCP close would
@@ -301,14 +380,36 @@ async fn handle_connection(
         // and defeat the lazy encoder's idle-stop. Once playing, drop the
         // timeout: RTP delivery doesn't depend on the read side, and a client
         // may legitimately stay quiet for a long time between GET_PARAMETERs.
-        let read_result = if state.playing {
-            read_half.read(&mut read_buf).await
-        } else {
-            match tokio::time::timeout(Duration::from_secs(60), read_half.read(&mut read_buf)).await
-            {
-                Ok(r) => r,
-                Err(_elapsed) => break Ok(()), // never reached PLAY within 60s -- treat as abandoned
-            }
+        // `rtsp.enabled` going false must TEARDOWN every live session, not
+        // just stop the listener accepting new ones -- otherwise RTP keeps
+        // flowing and `interest` stays pinned above zero. Breaking out here
+        // runs the same cleanup a client disconnect does (counters returned,
+        // play task aborted, socket closed). `AsyncReadExt::read` is
+        // cancel-safe, so losing this race never drops buffered bytes.
+        let read_result = tokio::select! {
+            biased;
+            _ = wait_until_disabled(&mut enabled_rx) => break Ok(()),
+            r = async {
+                if state.playing {
+                    read_half.read(&mut read_buf).await.map(Some)
+                } else {
+                    match tokio::time::timeout(
+                        Duration::from_secs(60),
+                        read_half.read(&mut read_buf),
+                    )
+                    .await
+                    {
+                        Ok(r) => r.map(Some),
+                        // never reached PLAY within 60s -- treat as abandoned
+                        Err(_elapsed) => Ok(None),
+                    }
+                }
+            } => r,
+        };
+        let read_result = match read_result {
+            Ok(Some(n)) => Ok(n),
+            Ok(None) => break Ok(()),
+            Err(e) => Err(e),
         };
         let n = match read_result {
             Ok(0) => break Ok(()), // client closed
@@ -609,6 +710,9 @@ mod tests {
             clients: AtomicUsize::new(0),
             want_encoder: Notify::new(),
             status_tx: watch::channel(RtspStatus::default()).0,
+            // These tests drive `handle_connection` directly, with no
+            // `listener_task` to publish the real setting.
+            enabled: watch::channel(true).0,
         });
         let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
         let bound_port = listener.local_addr().unwrap().port();
@@ -672,6 +776,9 @@ mod tests {
             clients: AtomicUsize::new(0),
             want_encoder: Notify::new(),
             status_tx: watch::channel(RtspStatus::default()).0,
+            // These tests drive `handle_connection` directly, with no
+            // `listener_task` to publish the real setting.
+            enabled: watch::channel(true).0,
         });
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let bound_port = listener.local_addr().unwrap().port();
@@ -726,6 +833,129 @@ mod tests {
         assert!(authed.starts_with("RTSP/1.0 200 OK\r\n"));
         assert!(authed.contains("Content-Type: application/sdp\r\n"));
         assert!(authed.contains("m=video 0 RTP/AVP 96"));
+    }
+
+    /// The header live555 (VLC 3.x's RTSP stack) actually sends: five fields,
+    /// no `nc`/`cnonce`/`qop`, response over `MD5(HA1:nonce:HA2)`. The server
+    /// advertises `qop="auth"` but the client is free to ignore it, so the
+    /// whole DESCRIBE path -- parse *and* verify -- has to accept this form or
+    /// such a client is 401'd forever.
+    #[tokio::test]
+    async fn describe_accepts_the_rfc2069_header_vlc_sends() {
+        let cfg = test_cfg();
+        {
+            let mut c = cfg.write().await;
+            c.settings.rtsp.auth_enabled = true;
+        }
+        let (username, ha1) = {
+            let c = cfg.read().await;
+            (c.rtsp_username.clone(), c.rtsp_password_ha1.clone())
+        };
+        let shared = Arc::new(Shared {
+            tx: broadcast::channel(16).0,
+            stream: std::sync::Mutex::new(StreamState {
+                sps: Some(vec![0x67, 0x42, 0x00, 0x1e]),
+                pps: Some(vec![0x68, 0xCE, 0x3C, 0x80]),
+            }),
+            counters: std::sync::Mutex::new(Counters {
+                seq: 0,
+                timestamp: 0,
+            }),
+            interest: AtomicUsize::new(0),
+            clients: AtomicUsize::new(0),
+            want_encoder: Notify::new(),
+            status_tx: watch::channel(RtspStatus::default()).0,
+            enabled: watch::channel(true).0,
+        });
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let bound_port = listener.local_addr().unwrap().port();
+        let accept_cfg = cfg.clone();
+        let accept_shared = shared.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let c = accept_cfg.clone();
+                let s = accept_shared.clone();
+                tokio::spawn(async move {
+                    let _ = handle_connection(stream, c, s).await;
+                });
+            }
+        });
+
+        let mut client = ClientStream::connect(("127.0.0.1", bound_port))
+            .await
+            .unwrap();
+        let unauth = send_and_read(
+            &mut client,
+            "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 1\r\n\r\n",
+        )
+        .await;
+        assert!(unauth.starts_with("RTSP/1.0 401"), "{unauth}");
+        assert!(
+            unauth.contains("qop=\"auth\""),
+            "challenge still advertises qop"
+        );
+        let nonce = unauth
+            .lines()
+            .find(|l| l.starts_with("WWW-Authenticate:"))
+            .unwrap()
+            .split("nonce=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_string();
+
+        let response =
+            digest::expected_response_rfc2069(&ha1, &nonce, "DESCRIBE", "rtsp://127.0.0.1/allsky");
+        let auth_header = format!(
+            "Digest username=\"{username}\", realm=\"rskycam\", nonce=\"{nonce}\", uri=\"rtsp://127.0.0.1/allsky\", response=\"{response}\""
+        );
+        let authed = send_and_read(
+            &mut client,
+            &format!(
+                "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 2\r\nAuthorization: {auth_header}\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(authed.starts_with("RTSP/1.0 200 OK\r\n"), "{authed}");
+
+        // A wrong password in that same form is still refused -- accepting the
+        // shape must not mean accepting the credential.
+        let mut liar = ClientStream::connect(("127.0.0.1", bound_port))
+            .await
+            .unwrap();
+        let challenge = send_and_read(
+            &mut liar,
+            "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 1\r\n\r\n",
+        )
+        .await;
+        let liar_nonce = challenge
+            .lines()
+            .find(|l| l.starts_with("WWW-Authenticate:"))
+            .unwrap()
+            .split("nonce=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_string();
+        let bad = digest::expected_response_rfc2069(
+            &digest::ha1(&username, digest::REALM, "not-the-password"),
+            &liar_nonce,
+            "DESCRIBE",
+            "rtsp://127.0.0.1/allsky",
+        );
+        let refused = send_and_read(
+            &mut liar,
+            &format!(
+                "DESCRIBE rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 2\r\nAuthorization: Digest username=\"{username}\", realm=\"rskycam\", nonce=\"{liar_nonce}\", uri=\"rtsp://127.0.0.1/allsky\", response=\"{bad}\"\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(refused.starts_with("RTSP/1.0 401"), "{refused}");
     }
 
     fn fixture_ffmpeg_path() -> PathBuf {
@@ -1170,5 +1400,120 @@ mod tests {
         assert!(collected.starts_with(b"RTSP/1.0 200 OK\r\n"));
         assert_eq!(frames[0].0, 0); // interleaved channel 0
         assert_eq!(status.borrow().clients, 1);
+    }
+
+    /// Per the spec's error-handling table, `enabled` toggled off with clients
+    /// connected must TEARDOWN all, stop the encoder and drop the listener --
+    /// not merely stop accepting new connections while the existing ones keep
+    /// streaming RTP and pinning `interest` above zero forever.
+    #[tokio::test]
+    async fn disabling_rtsp_disconnects_a_playing_client() {
+        let cfg = test_cfg();
+        {
+            let mut c = cfg.write().await;
+            c.settings.rtsp.auth_enabled = false;
+        }
+        let (_latest_tx, latest_rx) = watch::channel(None);
+        let handle = spawn_rtsp(cfg.clone(), latest_rx, fixture_ffmpeg_path());
+        let mut status = handle.status;
+        let port = wait_for_listening_port(&mut status).await;
+
+        let mut client = ClientStream::connect(("127.0.0.1", port)).await.unwrap();
+        let _ = send_and_read(
+            &mut client,
+            "SETUP rtsp://127.0.0.1/allsky/streamid=0 RTSP/1.0\r\nCSeq: 1\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
+        )
+        .await;
+        client
+            .write_all(b"PLAY rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 2\r\n\r\n")
+            .await
+            .unwrap();
+        // Wait until it is genuinely playing (RTP arriving), so the teardown
+        // below is exercised against a live session rather than a half-open one.
+        let mut collected = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = client.read(&mut buf).await.unwrap();
+                assert!(n > 0, "server closed the connection during PLAY");
+                collected.extend_from_slice(&buf[..n]);
+                if parse_interleaved_frames(&collected).is_some_and(|f| !f.is_empty()) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("client never reached a playing state");
+        assert_eq!(status.borrow().clients, 1);
+
+        {
+            let mut c = cfg.write().await;
+            c.settings.rtsp.enabled = false;
+        }
+
+        // The listener rechecks every 2s, so allow a few cycles.
+        let closed = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut buf = [0u8; 4096];
+            loop {
+                match client.read(&mut buf).await {
+                    Ok(0) | Err(_) => return, // EOF or reset -- the session was torn down
+                    Ok(_) => {}               // RTP still queued behind the close; keep draining
+                }
+            }
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "a playing client kept streaming after rtsp.enabled went false"
+        );
+
+        // And the counters came back, so a re-enable starts from a clean slate
+        // rather than a permanently-pinned client slot.
+        let settled = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let s = status.borrow().clone();
+                if !s.listening && !s.encoding && s.clients == 0 {
+                    return;
+                }
+                let _ = tokio::time::timeout(Duration::from_millis(200), status.changed()).await;
+            }
+        })
+        .await;
+        assert!(
+            settled.is_ok(),
+            "after disabling: {:?}",
+            status.borrow().clone()
+        );
+
+        // Re-enabling must bind again and serve a fresh client -- the disable
+        // path must not have left the supervisor or listener wedged.
+        {
+            let mut c = cfg.write().await;
+            c.settings.rtsp.enabled = true;
+            c.settings.rtsp.port = port; // reuse the port the OS handed out
+        }
+        let reopened = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if status.borrow().listening {
+                    return;
+                }
+                let _ = tokio::time::timeout(Duration::from_millis(200), status.changed()).await;
+            }
+        })
+        .await;
+        assert!(
+            reopened.is_ok(),
+            "listener never came back after re-enabling"
+        );
+        let mut again = ClientStream::connect(("127.0.0.1", port)).await.unwrap();
+        let setup = send_and_read(
+            &mut again,
+            "SETUP rtsp://127.0.0.1/allsky/streamid=0 RTSP/1.0\r\nCSeq: 1\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
+        )
+        .await;
+        assert!(
+            setup.starts_with("RTSP/1.0 200 OK\r\n"),
+            "a client reconnecting right after a re-enable was refused: {setup}"
+        );
     }
 }
