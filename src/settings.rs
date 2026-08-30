@@ -243,6 +243,55 @@ pub struct StorageSettings {
     pub artifacts_retention_days: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RtspSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_rtsp_port")]
+    pub port: u16,
+    #[serde(default = "default_rtsp_fps")]
+    pub fps: u32,
+    #[serde(default = "default_true")]
+    pub overlay: bool,
+    /// 0 = native capture width.
+    #[serde(default)]
+    pub output_width: u32,
+    #[serde(default = "default_rtsp_bitrate_kbps")]
+    pub bitrate_kbps: u32,
+    #[serde(default = "default_true")]
+    pub auth_enabled: bool,
+    /// Extra ffmpeg args appended before the output, whitespace-split into
+    /// argv (no shell) -- same convention as `timelapse_extra_args`.
+    #[serde(default)]
+    pub extra_args: String,
+}
+
+fn default_rtsp_port() -> u16 {
+    8554
+}
+
+fn default_rtsp_fps() -> u32 {
+    5
+}
+
+fn default_rtsp_bitrate_kbps() -> u32 {
+    2000
+}
+
+fn default_rtsp_settings() -> RtspSettings {
+    RtspSettings {
+        enabled: false,
+        port: default_rtsp_port(),
+        fps: default_rtsp_fps(),
+        overlay: true,
+        output_width: 0,
+        bitrate_kbps: default_rtsp_bitrate_kbps(),
+        auth_enabled: true,
+        extra_args: String::new(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DarkFrameSettings {
@@ -272,6 +321,8 @@ pub struct Settings {
     pub storage: StorageSettings,
     #[serde(default = "default_dark_frame_settings")]
     pub darks: DarkFrameSettings,
+    #[serde(default = "default_rtsp_settings")]
+    pub rtsp: RtspSettings,
 }
 
 impl Default for Settings {
@@ -361,6 +412,7 @@ impl Default for Settings {
                 min_gain_to_apply: 15.0,
                 min_exposure_us_to_apply: 10_000_000,
             },
+            rtsp: default_rtsp_settings(),
         }
     }
 }
@@ -406,6 +458,16 @@ impl Settings {
         self.storage.artifacts_retention_days = self.storage.artifacts_retention_days.max(1);
 
         self.darks.min_gain_to_apply = self.darks.min_gain_to_apply.max(0.0);
+
+        let r = &mut self.rtsp;
+        if r.port == 0 {
+            r.port = default_rtsp_port();
+        }
+        r.fps = r.fps.clamp(1, 30);
+        r.bitrate_kbps = r.bitrate_kbps.clamp(200, 20_000);
+        if r.output_width != 0 {
+            r.output_width = r.output_width.max(160);
+        }
     }
 }
 
@@ -750,6 +812,56 @@ mod tests {
         assert!(!loaded.settings.darks.enabled);
         assert_eq!(loaded.settings.darks.min_gain_to_apply, 15.0);
         assert_eq!(loaded.settings.darks.min_exposure_us_to_apply, 10_000_000);
+    }
+
+    #[test]
+    fn config_without_rtsp_section_loads_with_default() {
+        let dir = TempDir::new().unwrap();
+        let store = SettingsStore::new(dir.path());
+        let mut cfg = store.load_or_create("h").unwrap();
+        cfg.settings.location.latitude_deg = 41.9;
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        assert!(toml_str.contains("[settings.rtsp]"));
+        let mut older = String::new();
+        let mut skipping = false;
+        for line in toml_str.lines() {
+            if line.trim_start() == "[settings.rtsp]" {
+                skipping = true;
+                continue;
+            }
+            if skipping && line.starts_with('[') {
+                skipping = false;
+            }
+            if skipping {
+                continue;
+            }
+            older.push_str(line);
+            older.push('\n');
+        }
+        assert!(!older.contains("[settings.rtsp]"));
+        std::fs::write(dir.path().join("config.toml"), older).unwrap();
+
+        let loaded = store.load_or_create("h").unwrap();
+        assert_eq!(loaded.settings.location.latitude_deg, 41.9); // preserved
+        assert!(!loaded.settings.rtsp.enabled);
+        assert_eq!(loaded.settings.rtsp.port, 8554);
+        assert_eq!(loaded.settings.rtsp.fps, 5);
+        assert!(loaded.settings.rtsp.overlay);
+        assert!(loaded.settings.rtsp.auth_enabled);
+    }
+
+    #[test]
+    fn sanitize_clamps_rtsp_fields() {
+        let mut s = Settings::default();
+        s.rtsp.port = 0;
+        s.rtsp.fps = 999;
+        s.rtsp.bitrate_kbps = 1;
+        s.rtsp.output_width = 1;
+        s.sanitize();
+        assert_eq!(s.rtsp.port, 8554);
+        assert_eq!(s.rtsp.fps, 30);
+        assert_eq!(s.rtsp.bitrate_kbps, 200);
+        assert_eq!(s.rtsp.output_width, 160);
     }
 
     #[test]
