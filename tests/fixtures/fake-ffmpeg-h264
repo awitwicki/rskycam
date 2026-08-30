@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Test double for the H.264 RTSP encoder: ignores argv, reads stdin until
+# EOF (draining whatever JPEGs the feeder writes) while emitting one canned
+# Annex-B access unit (SPS+PPS+IDR) to stdout every 100ms, 10 times, then
+# exits 0. A "fake-ffmpeg-h264-fail" marker file in the CWD makes it exit 1
+# immediately instead (parallel-test-safe failure injection, same
+# convention as the existing tests/fixtures/fake-ffmpeg).
+set -eu
+if [ -f "./fake-ffmpeg-h264-fail" ]; then
+  echo "simulated encoder explosion" >&2
+  exit 1
+fi
+# `<&0` is load-bearing: a non-interactive shell has job control off, and
+# POSIX/bash then redirect an asynchronous command's stdin from /dev/null
+# unless it carries an *explicit* redirection -- a bare `cat >/dev/null &`
+# would exit instantly and drain nothing.
+cat <&0 >/dev/null &
+DRAIN_PID=$!
+for _ in $(seq 1 10); do
+  printf '\x00\x00\x00\x01\x67\x42\x00\x1e\xAA' # SPS
+  printf '\x00\x00\x00\x01\x68\xCE\x3C\x80'     # PPS
+  printf '\x00\x00\x00\x01\x65\xDE\xAD\xBE\xEF' # IDR
+  sleep 0.1
+done
+kill "$DRAIN_PID" 2>/dev/null || true

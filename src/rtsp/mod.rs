@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod digest;
+mod encoder;
 pub mod jpeg;
 pub mod rtp;
 pub mod sdp;
