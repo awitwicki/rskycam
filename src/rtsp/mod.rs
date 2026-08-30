@@ -1,8 +1,3 @@
-// Nothing here is reachable from `main.rs` until Task 11 calls `spawn_rtsp`,
-// and Tasks 9/10 fill in the encoder plumbing (`tx`, `counters`, `SSRC`,
-// `MAX_CLIENTS`, `IDLE_STOP_AFTER`) this skeleton only declares.
-#![allow(dead_code)]
-
 pub mod digest;
 mod encoder;
 pub mod jpeg;

@@ -78,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
         data_dir.clone(),
         Some(processing.frames.clone()),
     );
+    let rtsp = rtsp::spawn_rtsp(cfg.clone(), channels.latest.clone(), "ffmpeg".into());
     let update = Arc::new(update::UpdateState::new(update::UpdateConfig::default()));
     let state = web::AppState {
         cfg,
@@ -89,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
         darks_progress: channels.darks_progress.clone(),
         focus: channels.focus,
         focus_shared: channels.focus_shared.clone(),
+        rtsp_status: rtsp.status,
         key,
         data_dir,
         processing: processing.clone(),

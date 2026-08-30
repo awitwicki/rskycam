@@ -26,6 +26,7 @@ pub struct AppState {
     pub darks_progress: watch::Receiver<Option<crate::darks::DarksProgress>>,
     pub focus: watch::Receiver<Option<Arc<crate::capture::focus::FocusFrame>>>,
     pub focus_shared: Arc<crate::capture::focus::FocusShared>,
+    pub rtsp_status: watch::Receiver<crate::rtsp::RtspStatus>,
     pub key: Key,
     pub data_dir: PathBuf,
     pub processing: crate::processing::ProcessingHandle,
@@ -359,6 +360,7 @@ pub(crate) mod testing {
         let (darks_progress_tx, darks_progress) = watch::channel(None);
         let (focus_tx, focus) = watch::channel(None);
         let focus_shared = Arc::new(crate::capture::focus::FocusShared::new());
+        let (_rtsp_status_tx, rtsp_status) = watch::channel(crate::rtsp::RtspStatus::default());
         // A file that genuinely exists, so the harness's default config
         // doesn't trip the "hook not installed" precondition in
         // post_apply for tests that don't care about it either way.
@@ -394,6 +396,7 @@ pub(crate) mod testing {
             darks_progress,
             focus,
             focus_shared: focus_shared.clone(),
+            rtsp_status,
             key: Key::generate(),
             data_dir: dir.path().to_path_buf(),
             processing,
