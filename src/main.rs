@@ -5,6 +5,7 @@ mod darks;
 mod logs;
 mod overlay;
 mod processing;
+mod rtsp;
 mod sensors;
 mod settings;
 mod system;
