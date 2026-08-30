@@ -1165,6 +1165,8 @@ mod tests {
         let mut cfg = crate::settings::ConfigFile {
             version: 1,
             password_hash: "h".into(),
+            rtsp_username: "unused".into(),
+            rtsp_password_ha1: "unused".into(),
             settings: crate::settings::Settings::default(),
         };
         cfg.settings.camera.driver = crate::settings::CameraDriver::Mock;
@@ -1205,6 +1207,8 @@ mod tests {
         let mut cfg = crate::settings::ConfigFile {
             version: 1,
             password_hash: "h".into(),
+            rtsp_username: "unused".into(),
+            rtsp_password_ha1: "unused".into(),
             settings: crate::settings::Settings::default(),
         };
         cfg.settings.camera.driver = crate::settings::CameraDriver::Mock;

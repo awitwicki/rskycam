@@ -478,7 +478,23 @@ impl Settings {
 pub struct ConfigFile {
     pub version: u32,
     pub password_hash: String,
+    #[serde(default = "default_rtsp_username")]
+    pub rtsp_username: String,
+    #[serde(default = "default_rtsp_password_ha1")]
+    pub rtsp_password_ha1: String,
     pub settings: Settings,
+}
+
+fn default_rtsp_username() -> String {
+    "admin".to_string()
+}
+
+fn default_rtsp_password_ha1() -> String {
+    crate::rtsp::digest::ha1(
+        &default_rtsp_username(),
+        crate::rtsp::digest::REALM,
+        crate::auth::DEFAULT_PASSWORD,
+    )
 }
 
 #[allow(dead_code)]
@@ -526,6 +542,8 @@ impl SettingsStore {
         ConfigFile {
             version: 1,
             password_hash: password_hash.to_string(),
+            rtsp_username: default_rtsp_username(),
+            rtsp_password_ha1: default_rtsp_password_ha1(),
             settings: Settings::default(),
         }
     }
@@ -1030,5 +1048,40 @@ mod tests {
             (c.center_offset_x_px, c.center_offset_y_px),
             (5000.0, -5000.0)
         );
+    }
+
+    #[test]
+    fn fresh_config_seeds_rtsp_credentials_matching_the_default_web_login() {
+        let dir = TempDir::new().unwrap();
+        let store = SettingsStore::new(dir.path());
+        let cfg = store
+            .load_or_create(&crate::auth::hash_password(crate::auth::DEFAULT_PASSWORD).unwrap())
+            .unwrap();
+        assert_eq!(cfg.rtsp_username, "admin");
+        assert_eq!(
+            cfg.rtsp_password_ha1,
+            crate::rtsp::digest::ha1("admin", crate::rtsp::digest::REALM, "pa$$word!0")
+        );
+    }
+
+    #[test]
+    fn config_without_rtsp_credentials_loads_with_default() {
+        let dir = TempDir::new().unwrap();
+        let store = SettingsStore::new(dir.path());
+        let cfg = store.load_or_create("h").unwrap();
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        let older: String = toml_str
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("rtspUsername") && !t.starts_with("rtspPasswordHa1")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join("config.toml"), older).unwrap();
+
+        let loaded = store.load_or_create("h").unwrap();
+        assert_eq!(loaded.rtsp_username, "admin");
+        assert_eq!(loaded.password_hash, "h"); // untouched by the rtsp defaulting
     }
 }

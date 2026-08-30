@@ -604,6 +604,8 @@ mod tests {
         Arc::new(RwLock::new(crate::settings::ConfigFile {
             version: 1,
             password_hash: "h".into(),
+            rtsp_username: "unused".into(),
+            rtsp_password_ha1: "unused".into(),
             settings: crate::settings::Settings::default(),
         }))
     }
