@@ -50,6 +50,10 @@ export function defaultSettings(): Settings {
     processing: { keogram: true, startrails: true, startrailsBrightnessLimit: 35, timelapseDay: true, timelapseNight: true, timelapseFps: 25, timelapseExtraArgs: '' },
     storage: { framesRetentionDays: 14, artifactsRetentionDays: 60 },
     darks: { enabled: false, minGainToApply: 15, minExposureUsToApply: 10_000_000 },
+    rtsp: {
+      enabled: false, port: 8554, fps: 5, overlay: true, outputWidth: 0,
+      bitrateKbps: 2000, authEnabled: true, extraArgs: '',
+    },
   }
 }
 
@@ -140,6 +144,10 @@ export class MockApi implements ApiClient {
     const pw = localStorage.getItem(PASSWORD_KEY) ?? DEFAULT_PASSWORD
     if (oldPassword !== pw) return false
     localStorage.setItem(PASSWORD_KEY, newPassword)
+    return true
+  }
+
+  async setRtspCredentials(_username: string, _password: string): Promise<boolean> {
     return true
   }
 
@@ -243,6 +251,10 @@ export class MockApi implements ApiClient {
       },
       darksProgress: this.darksProgress,
       focus: { enabled: this.focusEnabled, exposureUs: this.focusExposureUs, gain: this.focusGain },
+      rtsp: {
+        enabled: false, listening: false, port: 8554, username: 'admin',
+        clients: 0, encoding: false, lastError: null,
+      },
     }
   }
 

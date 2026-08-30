@@ -34,6 +34,10 @@ const settings: Settings = {
   },
   storage: { framesRetentionDays: 14, artifactsRetentionDays: 60 },
   darks: { enabled: false, minGainToApply: 15, minExposureUsToApply: 10_000_000 },
+  rtsp: {
+    enabled: false, port: 8554, fps: 5, overlay: true, outputWidth: 0,
+    bitrateKbps: 2000, authEnabled: true, extraArgs: '',
+  },
 }
 
 const status: Status = {
@@ -49,6 +53,10 @@ const status: Status = {
   camera: null,
   darksProgress: null,
   focus: { enabled: false, exposureUs: 1_000_000, gain: 1 },
+  rtsp: {
+    enabled: false, listening: false, port: 8554, username: 'admin',
+    clients: 0, encoding: false, lastError: null,
+  },
 }
 
 const night = (date: string, startrails: NightSummary['startrails']): NightSummary => ({

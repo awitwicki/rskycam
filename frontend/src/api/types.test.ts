@@ -21,6 +21,10 @@ describe('api contract', () => {
       },
       darksProgress: { current: 3, total: 15 },
       focus: { enabled: true, exposureUs: 1_000_000, gain: 8 },
+      rtsp: {
+        enabled: true, listening: true, port: 8554, username: 'admin',
+        clients: 1, encoding: true, lastError: null,
+      },
     }
     expect(s.sensor.reading?.humidityPct).toBe(62)
 
@@ -84,6 +88,10 @@ describe('api contract', () => {
       processing: { keogram: true, startrails: true, startrailsBrightnessLimit: 35, timelapseDay: true, timelapseNight: true, timelapseFps: 25, timelapseExtraArgs: '' },
       storage: { framesRetentionDays: 14, artifactsRetentionDays: 60 },
       darks: { enabled: false, minGainToApply: 15, minExposureUsToApply: 10_000_000 },
+      rtsp: {
+        enabled: false, port: 8554, fps: 5, overlay: true, outputWidth: 0,
+        bitrateKbps: 2000, authEnabled: true, extraArgs: '',
+      },
     }
     expect(g.polylines[0].layer).toBe('altAz')
     expect(st.camera.driver).toBe('mock')

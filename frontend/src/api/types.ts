@@ -92,6 +92,16 @@ export interface DarksLibrary {
   entries: DarkEntry[]
 }
 
+export interface RtspStatus {
+  enabled: boolean
+  listening: boolean
+  port: number
+  username: string
+  clients: number
+  encoding: boolean
+  lastError: string | null
+}
+
 export interface Status {
   version: string
   capture: CaptureStatus
@@ -101,6 +111,7 @@ export interface Status {
   camera: CameraCaps | null
   darksProgress: DarksProgress | null
   focus: FocusInfo
+  rtsp: RtspStatus
 }
 
 /** GET /api/update — current build vs newest GitHub release. */
@@ -305,6 +316,17 @@ export interface DarkFrameSettings {
   minExposureUsToApply: number
 }
 
+export interface RtspSettings {
+  enabled: boolean
+  port: number
+  fps: number
+  overlay: boolean // bake the RA/Dec grid, cardinals, and text fields into the stream
+  outputWidth: number // 0 = native capture width
+  bitrateKbps: number
+  authEnabled: boolean
+  extraArgs: string // extra ffmpeg args, whitespace-separated
+}
+
 export interface Settings {
   camera: CameraSettings
   image: ImageSettings
@@ -314,6 +336,7 @@ export interface Settings {
   processing: ProcessingSettings
   storage: StorageSettings
   darks: DarkFrameSettings
+  rtsp: RtspSettings
 }
 
 // ── events ─────────────────────────────────────────────────────

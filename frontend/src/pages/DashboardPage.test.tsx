@@ -67,6 +67,7 @@ function apiWith(patchStatus: Partial<Status>): ApiClient {
     getSettings: base.getSettings.bind(base),
     putSettings: base.putSettings.bind(base),
     changePassword: base.changePassword.bind(base),
+    setRtspCredentials: base.setRtspCredentials.bind(base),
     getUpdate: base.getUpdate.bind(base),
     applyUpdate: base.applyUpdate.bind(base),
     getNights: base.getNights.bind(base),

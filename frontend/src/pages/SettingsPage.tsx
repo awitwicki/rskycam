@@ -12,7 +12,7 @@ import { formatExposure, formatGain } from '../lib/format'
 // instead of silently loading a broken draft (missing sections would render
 // as blank/NaN fields throughout the form).
 const SETTINGS_SECTIONS: (keyof Settings)[] = [
-  'camera', 'image', 'location', 'sensor', 'overlay', 'processing', 'storage', 'darks',
+  'camera', 'image', 'location', 'sensor', 'overlay', 'processing', 'storage', 'darks', 'rtsp',
 ]
 function isSettingsShape(v: unknown): v is Settings {
   return !!v && typeof v === 'object' && SETTINGS_SECTIONS.every((k) => k in (v as object))
@@ -26,6 +26,9 @@ export default function SettingsPage() {
   const [oldPw, setOldPw] = useState('')
   const [newPw, setNewPw] = useState('')
   const [pwMessage, setPwMessage] = useState<{ ok: boolean; text: string } | null>(null)
+  const [rtspUser, setRtspUser] = useState('admin')
+  const [rtspPw, setRtspPw] = useState('')
+  const [rtspMessage, setRtspMessage] = useState<{ ok: boolean; text: string } | null>(null)
   const [error, setError] = useState('')
   const [importError, setImportError] = useState('')
   const importInputRef = useRef<HTMLInputElement>(null)
@@ -84,6 +87,14 @@ export default function SettingsPage() {
       setOldPw('')
       setNewPw('')
     }
+  }
+
+  const saveRtspCredentials = async () => {
+    const ok = await getApi().setRtspCredentials(rtspUser, rtspPw)
+    setRtspMessage(ok
+      ? { ok: true, text: 'Stream credentials updated.' }
+      : { ok: false, text: 'Could not update stream credentials.' })
+    if (ok) setRtspPw('')
   }
 
   const startSweep = async () => {
@@ -372,6 +383,50 @@ export default function SettingsPage() {
           </div>
           <Input label="Extra ffmpeg args" value={draft.processing.timelapseExtraArgs}
             onChange={(v) => patch('processing', { timelapseExtraArgs: v })} />
+        </div>
+      </Card>
+
+      <Card title="Streaming">
+        <div className="flex flex-col gap-4">
+          <Toggle label="Enable RTSP stream" checked={draft.rtsp.enabled}
+            onChange={(v) => patch('rtsp', { enabled: v })} />
+          <div className="grid grid-cols-2 gap-3">
+            <NumberField label="Port" value={draft.rtsp.port}
+              onChange={(v) => patch('rtsp', { port: v })} min={1} max={65535} />
+            <NumberField label="FPS" value={draft.rtsp.fps}
+              onChange={(v) => patch('rtsp', { fps: v })} min={1} max={30} />
+            <NumberField label="Output width" value={draft.rtsp.outputWidth}
+              onChange={(v) => patch('rtsp', { outputWidth: v })} suffix="px (0 = native)" min={0} />
+            <NumberField label="Bitrate" value={draft.rtsp.bitrateKbps}
+              onChange={(v) => patch('rtsp', { bitrateKbps: v })} suffix="kbps" min={200} max={20000} />
+          </div>
+          <Toggle label="Bake overlay into the stream" checked={draft.rtsp.overlay}
+            onChange={(v) => patch('rtsp', { overlay: v })} />
+          <Toggle label="Require authentication" checked={draft.rtsp.authEnabled}
+            onChange={(v) => patch('rtsp', { authEnabled: v })} />
+          <Input label="Additional ffmpeg args" value={draft.rtsp.extraArgs}
+            onChange={(v) => patch('rtsp', { extraArgs: v })} />
+
+          <div className="rounded-lg border border-line bg-panel2 px-3 py-2 font-mono text-xs text-fgdim">
+            {`rtsp://${status?.rtsp.username ?? 'admin'}@${window.location.hostname}:${draft.rtsp.port}/allsky`}
+          </div>
+          <p className="text-xs text-fgdim">
+            {status?.rtsp.listening
+              ? `Listening · ${status.rtsp.clients} client${status.rtsp.clients === 1 ? '' : 's'} · ${status.rtsp.encoding ? 'encoding' : 'idle'}`
+              : status?.rtsp.lastError ?? 'Not listening'}
+          </p>
+
+          <div className="flex flex-col gap-3 border-t border-line pt-3">
+            <Input label="Stream username" value={rtspUser} onChange={setRtspUser} />
+            <Input label="Stream password" type="password" value={rtspPw} onChange={setRtspPw}
+              autoComplete="new-password" />
+            {rtspMessage && (
+              <p className={`text-sm ${rtspMessage.ok ? 'text-ok' : 'text-danger'}`}>{rtspMessage.text}</p>
+            )}
+            <Button variant="ghost" onClick={saveRtspCredentials} disabled={!rtspUser}>
+              Save credentials
+            </Button>
+          </div>
         </div>
       </Card>
 

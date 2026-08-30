@@ -19,6 +19,7 @@ export interface ApiClient {
   getSettings(): Promise<Settings>
   putSettings(s: Settings): Promise<void>
   changePassword(oldPassword: string, newPassword: string): Promise<boolean>
+  setRtspCredentials(username: string, password: string): Promise<boolean>
   getUpdate(): Promise<UpdateInfo>
   applyUpdate(): Promise<void>
   getNights(): Promise<NightSummary[]>

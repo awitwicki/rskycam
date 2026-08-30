@@ -65,6 +65,13 @@ export class RealApi implements ApiClient {
     return res.ok
   }
 
+  async setRtspCredentials(username: string, password: string): Promise<boolean> {
+    const res = await fetch('/api/rtsp/credentials', {
+      method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ username, password }),
+    })
+    return res.ok
+  }
+
   async getUpdate(): Promise<UpdateInfo> {
     return http('/api/update').then(json<UpdateInfo>)
   }

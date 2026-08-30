@@ -215,4 +215,13 @@ describe('SettingsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: /clear darks/i }))
     await waitFor(() => expect(screen.getByText(/no darks captured yet/i)).toBeInTheDocument())
   }, 10000)
+
+  it('renders the Streaming card and toggles enabled', async () => {
+    render(<SettingsPage />)
+    await screen.findByText('Streaming')
+    const toggle = screen.getByRole('switch', { name: /enable rtsp stream/i })
+    expect(toggle).toHaveAttribute('aria-checked', 'false')
+    await userEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-checked', 'true')
+  })
 })
