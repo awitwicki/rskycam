@@ -487,6 +487,19 @@ async fn handle_request(
             if state.session.is_none() {
                 return base(RtspStatusCode::MethodNotValidInThisState).build(Vec::new());
             }
+            // SETUP has no precondition on a prior DESCRIBE, so with auth
+            // disabled a connection can reach PLAY without ever having raised
+            // `interest` -- it would then count against the client cap while
+            // contributing nothing to the thing that keeps the encoder alive
+            // (no encoder at all for a lone such client, or one stopped out
+            // from under it when whichever other connection's DESCRIBE started
+            // it goes idle). `counted_interest` makes this the same idempotent
+            // per-connection bump DESCRIBE does, safe to run from both.
+            if !state.counted_interest {
+                state.counted_interest = true;
+                shared.interest.fetch_add(1, Ordering::SeqCst);
+                shared.want_encoder.notify_one();
+            }
             // A repeated PLAY on a session that is already playing must not
             // take a *second* slot out of the 4-client cap: the teardown and
             // disconnect paths only ever hand one back, so the counter would
@@ -1113,5 +1126,54 @@ mod tests {
         .await
         .expect("supervisor never went quiet after the last client left");
         assert!(settled, "encoder was left running with nothing interested");
+    }
+
+    /// With auth disabled, SETUP has no precondition on a prior DESCRIBE, so a
+    /// client can reach PLAY without ever having raised `interest`. PLAY must
+    /// raise it itself, otherwise the encoder never starts for such a client
+    /// (or gets stopped out from under it) and no RTP is ever delivered.
+    #[tokio::test]
+    async fn play_without_a_prior_describe_still_starts_the_encoder() {
+        let cfg = test_cfg();
+        {
+            let mut c = cfg.write().await;
+            c.settings.rtsp.auth_enabled = false;
+        }
+        let (_latest_tx, latest_rx) = watch::channel(None);
+        let handle = spawn_rtsp(cfg, latest_rx, fixture_ffmpeg_path());
+        let mut status = handle.status;
+        let port = wait_for_listening_port(&mut status).await;
+
+        let mut client = ClientStream::connect(("127.0.0.1", port)).await.unwrap();
+        let setup = send_and_read(
+            &mut client,
+            "SETUP rtsp://127.0.0.1/allsky/streamid=0 RTSP/1.0\r\nCSeq: 1\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
+        )
+        .await;
+        assert!(setup.starts_with("RTSP/1.0 200 OK\r\n"), "{setup}");
+
+        client
+            .write_all(b"PLAY rtsp://127.0.0.1/allsky RTSP/1.0\r\nCSeq: 2\r\n\r\n")
+            .await
+            .unwrap();
+        let mut collected = Vec::new();
+        let frames = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = client.read(&mut buf).await.unwrap();
+                assert!(n > 0, "server closed the connection during PLAY");
+                collected.extend_from_slice(&buf[..n]);
+                if let Some(frames) = parse_interleaved_frames(&collected) {
+                    if !frames.is_empty() {
+                        return frames;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("PLAY alone never started the encoder -- no RTP arrived");
+        assert!(collected.starts_with(b"RTSP/1.0 200 OK\r\n"));
+        assert_eq!(frames[0].0, 0); // interleaved channel 0
+        assert_eq!(status.borrow().clients, 1);
     }
 }
