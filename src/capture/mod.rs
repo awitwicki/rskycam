@@ -81,6 +81,7 @@ pub struct LatestFrame {
     pub jpeg: Bytes,         // masked + cropped, clean — what the dashboard shows
     pub persist_jpeg: Bytes, // what goes to disk: overlay-baked when enabled, else == jpeg
     pub raw_jpeg: Bytes,     // full sensor frame (mask applied, no crop) for the editor
+    pub stream_jpeg: Bytes, // what the RTSP encoder feeds on: overlay-baked when rtsp.overlay is on, else == jpeg
     pub raw_width: u32,
     pub raw_height: u32,
     pub meta: FrameMeta,
@@ -167,10 +168,13 @@ pub fn process_frame(
     };
     let jpeg = Bytes::from(encode_jpeg(&processed)?);
 
-    let persist_jpeg = if s.overlay.bake_into_saved_frames {
+    let wants_baked_persist = s.overlay.bake_into_saved_frames;
+    let wants_baked_stream = s.rtsp.enabled && s.rtsp.overlay;
+    let baked_jpeg = if wants_baked_persist || wants_baked_stream {
         // Same geometry pipeline as GET/POST /api/overlay: build at raw
         // size, append text fields, then crop — so the baked overlay is
-        // exactly what the browser preview shows (WYSIWYG).
+        // exactly what the browser preview shows (WYSIWYG). Computed once
+        // here and shared by whichever of persist_jpeg/stream_jpeg want it.
         let mut geo = geometry::build_overlay_geometry(&geometry::BuildOptions {
             time: frame.timestamp,
             location: &s.location,
@@ -199,7 +203,19 @@ pub fn process_frame(
         }
         let mut baked = processed.clone();
         crate::overlay::bake::bake_overlay(&mut baked, &geo);
-        Bytes::from(encode_jpeg(&baked)?)
+        Some(Bytes::from(encode_jpeg(&baked)?))
+    } else {
+        None
+    };
+    let persist_jpeg = if wants_baked_persist {
+        baked_jpeg
+            .clone()
+            .expect("baked_jpeg computed when wants_baked_persist")
+    } else {
+        jpeg.clone()
+    };
+    let stream_jpeg = if wants_baked_stream {
+        baked_jpeg.expect("baked_jpeg computed when wants_baked_stream")
     } else {
         jpeg.clone()
     };
@@ -217,6 +233,7 @@ pub fn process_frame(
             jpeg,
             persist_jpeg,
             raw_jpeg,
+            stream_jpeg,
             raw_width: rw,
             raw_height: rh,
             meta,
@@ -1010,6 +1027,66 @@ mod tests {
         let img = image::load_from_memory(&baked.persist_jpeg).unwrap();
         let clean_img = image::load_from_memory(&clean.jpeg).unwrap();
         assert_eq!(img.width(), clean_img.width());
+    }
+
+    #[test]
+    fn stream_jpeg_is_clean_when_rtsp_overlay_is_off() {
+        use crate::camera::{Camera, CaptureParams};
+        let mut cam = crate::camera::mock::MockCamera::new();
+        let frame = cam
+            .capture(CaptureParams {
+                exposure_us: 1_000_000,
+                gain: 4.0,
+            })
+            .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut s = crate::settings::Settings::default();
+        s.overlay.bake_into_saved_frames = false;
+        s.rtsp.enabled = true;
+        s.rtsp.overlay = false;
+        let (latest, clean) = process_frame(
+            &frame,
+            &s,
+            dir.path(),
+            crate::settings::CameraDriver::Mock,
+            true,
+            None,
+            1280,
+        )
+        .unwrap();
+        assert_eq!(
+            latest.stream_jpeg.to_vec(),
+            crate::camera::encode_jpeg(&clean).unwrap()
+        );
+    }
+
+    #[test]
+    fn stream_jpeg_is_baked_when_rtsp_overlay_is_on_even_if_persist_bake_is_off() {
+        use crate::camera::{Camera, CaptureParams};
+        let mut cam = crate::camera::mock::MockCamera::new();
+        let frame = cam
+            .capture(CaptureParams {
+                exposure_us: 1_000_000,
+                gain: 4.0,
+            })
+            .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut s = crate::settings::Settings::default();
+        s.overlay.bake_into_saved_frames = false;
+        s.rtsp.enabled = true;
+        s.rtsp.overlay = true;
+        let (latest, _clean) = process_frame(
+            &frame,
+            &s,
+            dir.path(),
+            crate::settings::CameraDriver::Mock,
+            true,
+            None,
+            1280,
+        )
+        .unwrap();
+        assert_eq!(latest.persist_jpeg, latest.jpeg); // persist bake stayed off
+        assert_ne!(latest.stream_jpeg, latest.jpeg); // stream bake is on
     }
 
     #[test]
