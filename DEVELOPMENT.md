@@ -137,6 +137,36 @@ Note: `timelapseExtraArgs` (Settings → Processing) is passed verbatim to
 `ffmpeg` — it is an admin-level knob by design; only the authenticated
 admin can set it, and it runs with the service's (unprivileged) rights.
 
+## RTSP streaming
+
+Settings → Streaming exposes the all-sky view as `rtsp://<user>@<host>:
+<port>/allsky` (default port 8554, off by default) for NVR/Home Assistant
+integration. It's a synthetic stream: the latest captured frame,
+repeated at a fixed fps (5 by default) until capture publishes a new
+one, encoded with `ffmpeg`/libx264 (the same `ffmpeg` dependency the
+timelapse feature already requires). The overlay is baked in by default;
+toggle it off in Settings to stream clean frames instead. `extraArgs` is
+passed verbatim to `ffmpeg`, same admin-knob convention as
+`timelapseExtraArgs`.
+
+The encoder starts on the first client connection and stops after ~10s
+with nobody watching, so a freshly-enabled or long-idle stream can take
+several seconds to respond to the very first connection attempt (real
+ffmpeg startup + first frame) — a client that doesn't retry on an
+initial failure (e.g. a bare `ffprobe` invocation) may need a second
+try; most NVR software retries automatically.
+
+**Stream credentials are separate from the web login** (`admin`/
+`pa$$word!0` by default, changeable independently in Settings) —
+changing your dashboard password does not change the stream password,
+and vice versa.
+
+**If a client can't connect but `ffprobe`/VLC on your own machine can:**
+some NVR/camera-integration stacks (Synology Surveillance Station is a
+known case) don't resolve `.local` mDNS hostnames the way most desktop
+OSes do. Use the Pi's LAN IP address instead of `<hostname>.local` in
+that client's camera path.
+
 ## Dev deploys to a Raspberry Pi
 
 For iterating on a Pi that was set up with the installer,

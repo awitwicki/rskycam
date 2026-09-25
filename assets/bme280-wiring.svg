@@ -1,0 +1,198 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 900" width="1240" height="900" role="img" aria-labelledby="ttl dsc">
+<title id="ttl">BME280 wiring to a Raspberry Pi 40-pin header</title>
+<desc id="dsc">The BME280 breakout connects to the Raspberry Pi over I2C with four leads: VIN to pin 1 (3V3), GND to pin 6 (GND), SCL to pin 5 (GPIO3 / SCL1) and SDA to pin 3 (GPIO2 / SDA1).</desc>
+<rect x="0.0" y="0.0" width="1240.0" height="900.0" rx="0" fill="#f5f7fa"/>
+<rect x="0.5" y="0.5" width="1239.0" height="899.0" rx="0" fill="none" stroke="#dde2e8" stroke-width="1"/>
+<text x="45.0" y="62.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="30" font-weight="700" fill="#161b22" text-anchor="start">BME280 → Raspberry Pi</text>
+<text x="45.0" y="92.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="16" font-weight="normal" fill="#5b6672" text-anchor="start">Four leads over I²C. rskycam reads the sensor on /dev/i2c-1.</text>
+<rect x="64.0" y="139.0" width="236.0" height="146.0" rx="8" fill="#000000" opacity="0.10"/>
+<rect x="60.0" y="134.0" width="236.0" height="146.0" rx="8" fill="#5b3c95" stroke="#3b2566" stroke-width="2"/>
+<rect x="67.0" y="141.0" width="222.0" height="132.0" rx="5" fill="none" stroke="#7a5bb5" stroke-width="1"/>
+<text x="80.0" y="174.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="21" font-weight="700" fill="#f1ecfb" text-anchor="start">BME280</text>
+<text x="80.0" y="196.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="normal" fill="#c9b9ec" text-anchor="start">temp · humidity · pressure</text>
+<rect x="228.0" y="160.0" width="46.0" height="40.0" rx="4" fill="#c3c9d1" stroke="#8d949d" stroke-width="1.2"/>
+<circle cx="237.0" cy="169.0" r="3.0" fill="#7d848d"/>
+<rect x="236.0" y="212.0" width="26.0" height="12.0" rx="2" fill="#d8d2e8" stroke="#a79bc4" stroke-width="1"/>
+<circle cx="278.0" cy="152.0" r="6.0" fill="#f5f7fa" stroke="#8b7ab5" stroke-width="2"/>
+<rect x="74.0" y="250.0" width="176.0" height="30.0" rx="3" fill="#181c22" stroke="#000000" stroke-width="1"/>
+<text x="96.0" y="242.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#f1ecfb" text-anchor="middle">VIN</text>
+<rect x="89.0" y="258.0" width="14.0" height="14.0" rx="2" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<rect x="93.5" y="280.0" width="5.0" height="16.0" rx="1" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<text x="140.0" y="242.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#f1ecfb" text-anchor="middle">GND</text>
+<rect x="133.0" y="258.0" width="14.0" height="14.0" rx="2" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<rect x="137.5" y="280.0" width="5.0" height="16.0" rx="1" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<text x="184.0" y="242.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#f1ecfb" text-anchor="middle">SCL</text>
+<rect x="177.0" y="258.0" width="14.0" height="14.0" rx="2" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<rect x="181.5" y="280.0" width="5.0" height="16.0" rx="1" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<text x="228.0" y="242.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#f1ecfb" text-anchor="middle">SDA</text>
+<rect x="221.0" y="258.0" width="14.0" height="14.0" rx="2" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<rect x="225.5" y="280.0" width="5.0" height="16.0" rx="1" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<rect x="50.0" y="386.0" width="700.0" height="461.2" rx="12" fill="#000000" opacity="0.10"/>
+<rect x="45.0" y="380.0" width="700.0" height="461.2" rx="12" fill="#11663b" stroke="#0a4326" stroke-width="2"/>
+<circle cx="73.8" cy="408.8" r="7.0" fill="#f5f7fa" stroke="#0a4326" stroke-width="2"/>
+<circle cx="73.8" cy="812.4" r="7.0" fill="#f5f7fa" stroke="#0a4326" stroke-width="2"/>
+<circle cx="551.5" cy="408.8" r="7.0" fill="#f5f7fa" stroke="#0a4326" stroke-width="2"/>
+<circle cx="551.5" cy="812.4" r="7.0" fill="#f5f7fa" stroke="#0a4326" stroke-width="2"/>
+<rect x="570.0" y="396.0" width="200.0" height="132.0" rx="3" fill="#c3c9d1" stroke="#8d949d" stroke-width="1.2"/>
+<rect x="739.0" y="406.0" width="31.0" height="112.0" rx="2" fill="#aeb5bd" stroke="#8d949d" stroke-width="1"/>
+<rect x="747.0" y="430.0" width="20.0" height="64.0" rx="2" fill="#2a2f37"/>
+<rect x="570.0" y="548.0" width="200.0" height="122.0" rx="3" fill="#c3c9d1" stroke="#8d949d" stroke-width="1.2"/>
+<rect x="739.0" y="558.0" width="31.0" height="102.0" rx="2" fill="#aeb5bd" stroke="#8d949d" stroke-width="1"/>
+<rect x="747.0" y="566.0" width="20.0" height="26.0" rx="2" fill="#2a2f37"/>
+<rect x="747.0" y="626.0" width="20.0" height="26.0" rx="2" fill="#2a2f37"/>
+<rect x="570.0" y="690.0" width="200.0" height="122.0" rx="3" fill="#c3c9d1" stroke="#8d949d" stroke-width="1.2"/>
+<rect x="739.0" y="700.0" width="31.0" height="102.0" rx="2" fill="#aeb5bd" stroke="#8d949d" stroke-width="1"/>
+<rect x="747.0" y="708.0" width="20.0" height="26.0" rx="2" fill="#2a2f37"/>
+<rect x="747.0" y="768.0" width="20.0" height="26.0" rx="2" fill="#2a2f37"/>
+<rect x="127.4" y="811.2" width="74.1" height="42.0" rx="3" fill="#c3c9d1" stroke="#8d949d" stroke-width="1.2"/>
+<rect x="133.4" y="843.2" width="62.1" height="9.0" rx="3" fill="#2a2f37"/>
+<rect x="250.9" y="811.2" width="65.9" height="42.0" rx="3" fill="#c3c9d1" stroke="#8d949d" stroke-width="1.2"/>
+<rect x="256.9" y="843.2" width="53.9" height="9.0" rx="3" fill="#2a2f37"/>
+<rect x="366.2" y="811.2" width="65.9" height="42.0" rx="3" fill="#c3c9d1" stroke="#8d949d" stroke-width="1.2"/>
+<rect x="372.2" y="843.2" width="53.9" height="9.0" rx="3" fill="#2a2f37"/>
+<rect x="489.7" y="811.2" width="49.4" height="42.0" rx="3" fill="#c3c9d1" stroke="#8d949d" stroke-width="1.2"/>
+<rect x="495.7" y="843.2" width="37.4" height="9.0" rx="3" fill="#1f2933"/>
+<rect x="31.0" y="733.2" width="20.0" height="70.0" rx="2" fill="#2a2f37" stroke="#111" stroke-width="1"/>
+<rect x="430.0" y="570.0" width="84.0" height="84.0" rx="4" fill="#2a2f37" stroke="#14181d" stroke-width="1.2"/>
+<rect x="438.0" y="578.0" width="68.0" height="68.0" rx="2" fill="#3c434d"/>
+<text x="472.0" y="617.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13" font-weight="700" fill="#9aa3ad" text-anchor="middle">SoC</text>
+<rect x="345.0" y="590.0" width="62.0" height="46.0" rx="3" fill="#2a2f37" stroke="#14181d" stroke-width="1.2"/>
+<rect x="295.0" y="700.0" width="96.0" height="60.0" rx="3" fill="#c3c9d1" stroke="#8d949d" stroke-width="1.2"/>
+<rect x="495.0" y="660.0" width="16.0" height="96.0" rx="2" fill="#e8e6df" stroke="#a8a69e" stroke-width="1.2"/>
+<text x="503.0" y="772.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="10.5" font-weight="700" fill="#bfe3cd" text-anchor="middle" opacity="0.7">CAM</text>
+<text x="75.0" y="770.2" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#bfe3cd" text-anchor="start" opacity="0.8">Raspberry Pi</text>
+<text x="75.0" y="789.2" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="normal" fill="#bfe3cd" text-anchor="start" opacity="0.55">40-pin header — any model</text>
+<rect x="96.3" y="385.4" width="418.4" height="46.9" rx="3" fill="#181c22" stroke="#000000" stroke-width="1"/>
+<circle cx="106.8" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="106.8" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="127.7" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="127.7" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="148.6" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="148.6" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="169.5" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="169.5" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="190.4" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="190.4" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="211.4" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="211.4" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="232.3" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="232.3" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="253.2" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="253.2" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="274.1" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="274.1" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="295.0" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="295.0" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="315.9" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="315.9" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="336.9" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="336.9" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="357.8" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="357.8" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="378.7" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="378.7" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="399.6" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="399.6" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="420.5" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="420.5" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="441.4" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="441.4" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="462.4" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="462.4" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="483.3" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="483.3" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="504.2" cy="398.4" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<circle cx="504.2" cy="419.3" r="4.6" fill="#e6b94f" stroke="#a97f21" stroke-width="1"/>
+<rect x="100.4" y="412.9" width="12.8" height="12.8" rx="1" fill="none" stroke="#ffffff" stroke-width="1.6"/>
+<rect x="93.3" y="381.4" width="67.3" height="54.9" rx="4" fill="none" stroke="#ffffff" stroke-width="1.8" opacity="0.85" stroke-dasharray="6 5"/>
+<text x="300.0" y="465.3" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#bfe3cd" text-anchor="start" opacity="0.9">pins 1–6  —  detail on the right →</text>
+<path d="M 96.0,296.0 C 84,330 62,388 74,436 C 86,474 104,444 106.8,419.3" fill="none" stroke="#94201a" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 96.0,296.0 C 84,330 62,388 74,436 C 86,474 104,444 106.8,419.3" fill="none" stroke="#e03b2f" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 140.0,296.0 C 142,318 148.6,336 148.6,398.4" fill="none" stroke="#12161b" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 140.0,296.0 C 142,318 148.6,336 148.6,398.4" fill="none" stroke="#2c333c" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 184.0,296.0 C 202,330 214,392 200,444 C 188,484 166,458 148.6,419.3" fill="none" stroke="#966c00" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 184.0,296.0 C 202,330 214,392 200,444 C 188,484 166,458 148.6,419.3" fill="none" stroke="#e8ae16" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 228.0,296.0 C 252,352 254,472 238,530 C 218,574 162,576 142,524 C 133,494 135,452 127.7,419.3" fill="none" stroke="#17508f" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 228.0,296.0 C 252,352 254,472 238,530 C 218,574 162,576 142,524 C 133,494 135,452 127.7,419.3" fill="none" stroke="#2f7fe0" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="106.8" cy="419.3" r="9.5" fill="#20262e" stroke="#94201a" stroke-width="1.5"/>
+<circle cx="106.8" cy="419.3" r="9.5" fill="none" stroke="#e03b2f" stroke-width="3"/>
+<circle cx="106.8" cy="419.3" r="2.6" fill="#e6b94f"/>
+<circle cx="148.6" cy="398.4" r="9.5" fill="#20262e" stroke="#12161b" stroke-width="1.5"/>
+<circle cx="148.6" cy="398.4" r="9.5" fill="none" stroke="#2c333c" stroke-width="3"/>
+<circle cx="148.6" cy="398.4" r="2.6" fill="#e6b94f"/>
+<circle cx="148.6" cy="419.3" r="9.5" fill="#20262e" stroke="#966c00" stroke-width="1.5"/>
+<circle cx="148.6" cy="419.3" r="9.5" fill="none" stroke="#e8ae16" stroke-width="3"/>
+<circle cx="148.6" cy="419.3" r="2.6" fill="#e6b94f"/>
+<circle cx="127.7" cy="419.3" r="9.5" fill="#20262e" stroke="#17508f" stroke-width="1.5"/>
+<circle cx="127.7" cy="419.3" r="9.5" fill="none" stroke="#2f7fe0" stroke-width="3"/>
+<circle cx="127.7" cy="419.3" r="2.6" fill="#e6b94f"/>
+<rect x="790.0" y="130.0" width="410.0" height="226.0" rx="10" fill="#ffffff" stroke="#d8dee4" stroke-width="1.5"/>
+<text x="812.0" y="165.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="19" font-weight="700" fill="#161b22" text-anchor="start">Header detail</text>
+<text x="812.0" y="186.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13" font-weight="normal" fill="#5b6672" text-anchor="start">the six pins nearest the USB-C end</text>
+<rect x="822.0" y="202.0" width="184.0" height="114.0" rx="4" fill="#181c22" stroke="#000000" stroke-width="1"/>
+<circle cx="852.0" cy="232.0" r="15.0" fill="#e6b94f" stroke="#a97f21" stroke-width="1.5"/>
+<text x="852.0" y="237.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#3a2c07" text-anchor="middle">2</text>
+<circle cx="914.0" cy="232.0" r="15.0" fill="#e6b94f" stroke="#a97f21" stroke-width="1.5"/>
+<text x="914.0" y="237.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#3a2c07" text-anchor="middle">4</text>
+<circle cx="976.0" cy="232.0" r="15.0" fill="#e6b94f" stroke="#a97f21" stroke-width="1.5"/>
+<circle cx="976.0" cy="232.0" r="19.5" fill="none" stroke="#2c333c" stroke-width="4"/>
+<text x="976.0" y="237.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#3a2c07" text-anchor="middle">6</text>
+<circle cx="852.0" cy="286.0" r="15.0" fill="#e6b94f" stroke="#a97f21" stroke-width="1.5"/>
+<circle cx="852.0" cy="286.0" r="19.5" fill="none" stroke="#e03b2f" stroke-width="4"/>
+<text x="852.0" y="291.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#3a2c07" text-anchor="middle">1</text>
+<circle cx="914.0" cy="286.0" r="15.0" fill="#e6b94f" stroke="#a97f21" stroke-width="1.5"/>
+<circle cx="914.0" cy="286.0" r="19.5" fill="none" stroke="#2f7fe0" stroke-width="4"/>
+<text x="914.0" y="291.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#3a2c07" text-anchor="middle">3</text>
+<circle cx="976.0" cy="286.0" r="15.0" fill="#e6b94f" stroke="#a97f21" stroke-width="1.5"/>
+<circle cx="976.0" cy="286.0" r="19.5" fill="none" stroke="#e8ae16" stroke-width="4"/>
+<text x="976.0" y="291.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#3a2c07" text-anchor="middle">5</text>
+<rect x="831.0" y="265.0" width="42.0" height="42.0" rx="2" fill="none" stroke="#ffffff" stroke-width="1.6"/>
+<text x="1028.0" y="229.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="normal" fill="#5b6672" text-anchor="start">outer row</text>
+<text x="1028.0" y="246.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="normal" fill="#8b949e" text-anchor="start">even pins</text>
+<text x="1028.0" y="283.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="normal" fill="#5b6672" text-anchor="start">inner row</text>
+<text x="1028.0" y="300.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="normal" fill="#8b949e" text-anchor="start">odd pins</text>
+<rect x="812.0" y="319.0" width="11.0" height="11.0" rx="1" fill="none" stroke="#5b6672" stroke-width="1.5"/>
+<text x="830.0" y="329.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="normal" fill="#5b6672" text-anchor="start">pin 1 — square pad on the board</text>
+<rect x="790.0" y="376.0" width="410.0" height="236.0" rx="10" fill="#ffffff" stroke="#d8dee4" stroke-width="1.5"/>
+<text x="812.0" y="411.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="19" font-weight="700" fill="#161b22" text-anchor="start">Connections</text>
+<line x1="812.0" y1="443" x2="850.0" y2="443" stroke="#94201a" stroke-width="9" stroke-linecap="round"/>
+<line x1="812.0" y1="443" x2="850.0" y2="443" stroke="#e03b2f" stroke-width="5.5" stroke-linecap="round"/>
+<text x="864.0" y="448.0" font-family="'DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="15.5" font-weight="700" fill="#161b22" text-anchor="start">VIN</text>
+<text x="926.0" y="448.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="normal" fill="#8b949e" text-anchor="start">→</text>
+<text x="952.0" y="448.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#161b22" text-anchor="start">Pin 1</text>
+<text x="1008.0" y="448.0" font-family="'DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="14.5" font-weight="normal" fill="#5b6672" text-anchor="start">3V3</text>
+<line x1="812.0" y1="462" x2="1178.0" y2="462" stroke="#d8dee4" stroke-width="1"/>
+<line x1="812.0" y1="481" x2="850.0" y2="481" stroke="#12161b" stroke-width="9" stroke-linecap="round"/>
+<line x1="812.0" y1="481" x2="850.0" y2="481" stroke="#2c333c" stroke-width="5.5" stroke-linecap="round"/>
+<text x="864.0" y="486.0" font-family="'DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="15.5" font-weight="700" fill="#161b22" text-anchor="start">GND</text>
+<text x="926.0" y="486.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="normal" fill="#8b949e" text-anchor="start">→</text>
+<text x="952.0" y="486.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#161b22" text-anchor="start">Pin 6</text>
+<text x="1008.0" y="486.0" font-family="'DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="14.5" font-weight="normal" fill="#5b6672" text-anchor="start">GND</text>
+<line x1="812.0" y1="500" x2="1178.0" y2="500" stroke="#d8dee4" stroke-width="1"/>
+<line x1="812.0" y1="519" x2="850.0" y2="519" stroke="#966c00" stroke-width="9" stroke-linecap="round"/>
+<line x1="812.0" y1="519" x2="850.0" y2="519" stroke="#e8ae16" stroke-width="5.5" stroke-linecap="round"/>
+<text x="864.0" y="524.0" font-family="'DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="15.5" font-weight="700" fill="#161b22" text-anchor="start">SCL</text>
+<text x="926.0" y="524.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="normal" fill="#8b949e" text-anchor="start">→</text>
+<text x="952.0" y="524.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#161b22" text-anchor="start">Pin 5</text>
+<text x="1008.0" y="524.0" font-family="'DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="14.5" font-weight="normal" fill="#5b6672" text-anchor="start">GPIO3 / SCL1</text>
+<line x1="812.0" y1="538" x2="1178.0" y2="538" stroke="#d8dee4" stroke-width="1"/>
+<line x1="812.0" y1="557" x2="850.0" y2="557" stroke="#17508f" stroke-width="9" stroke-linecap="round"/>
+<line x1="812.0" y1="557" x2="850.0" y2="557" stroke="#2f7fe0" stroke-width="5.5" stroke-linecap="round"/>
+<text x="864.0" y="562.0" font-family="'DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="15.5" font-weight="700" fill="#161b22" text-anchor="start">SDA</text>
+<text x="926.0" y="562.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="normal" fill="#8b949e" text-anchor="start">→</text>
+<text x="952.0" y="562.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#161b22" text-anchor="start">Pin 3</text>
+<text x="1008.0" y="562.0" font-family="'DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="14.5" font-weight="normal" fill="#5b6672" text-anchor="start">GPIO2 / SDA1</text>
+<rect x="790.0" y="632.0" width="410.0" height="198.0" rx="10" fill="#ffffff" stroke="#d8dee4" stroke-width="1.5"/>
+<text x="812.0" y="666.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="19" font-weight="700" fill="#161b22" text-anchor="start">Then, on the Pi</text>
+<circle cx="820.0" cy="695.0" r="9.5" fill="#eaeef2" stroke="#d8dee4" stroke-width="1"/>
+<text x="820.0" y="700.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#5b6672" text-anchor="middle">1</text>
+<text x="838.0" y="700.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13.5" fill="#5b6672"><tspan font-family="'DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="14" font-weight="700" fill="#161b22">sudo raspi-config</tspan><tspan dx="8"> → Interface Options → I2C</tspan></text>
+<circle cx="820.0" cy="725.0" r="9.5" fill="#eaeef2" stroke="#d8dee4" stroke-width="1"/>
+<text x="820.0" y="730.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#5b6672" text-anchor="middle">2</text>
+<text x="838.0" y="730.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13.5" fill="#5b6672"><tspan font-family="'DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="14" font-weight="700" fill="#161b22">i2cdetect -y 1</tspan><tspan dx="8">lists 76 or 77</tspan></text>
+<circle cx="820.0" cy="755.0" r="9.5" fill="#eaeef2" stroke="#d8dee4" stroke-width="1"/>
+<text x="820.0" y="760.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#5b6672" text-anchor="middle">3</text>
+<text x="838.0" y="760.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="normal" fill="#5b6672" text-anchor="start">Settings → Sensor → enable BME280</text>
+<text x="812.0" y="804.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13" font-weight="normal" fill="#5b6672" text-anchor="start">6-pin GY-BME280 boards: leave CSB and SDO unconnected.</text>
+<text x="45.0" y="878.0" font-family="'DejaVu Sans','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="normal" fill="#8b949e" text-anchor="start">Wiring is the same on every 40-pin Raspberry Pi. rskycam probes both 0x76 and 0x77, so either address strap works.</text>
+</svg>
