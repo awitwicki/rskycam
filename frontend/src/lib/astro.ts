@@ -103,6 +103,95 @@ export function moonIllumination(d: Date): { pct: number; waxing: boolean } {
   }
 }
 
+const SUN_RISE_SET_ALT_DEG = -0.833
+const ASTRO_TWILIGHT_ALT_DEG = -18
+const MOON_RISE_SET_ALT_DEG = 0
+const EVENT_STEP_MS = 10 * 60_000
+
+/** First crossing of `altDeg(t)` through `thresholdDeg` at or after
+ *  `fromMs`, scanning in `stepMs` increments up to (not including) `toMs`;
+ *  `rising` selects an ascending vs. descending crossing. Refined to ~1
+ *  minute via bisection. Null if no such crossing occurs in the window. */
+function findCrossing(
+  altDeg: (d: Date) => number, thresholdDeg: number, rising: boolean,
+  fromMs: number, toMs: number, stepMs: number,
+): Date | null {
+  let t0 = fromMs
+  let above0 = altDeg(new Date(t0)) >= thresholdDeg
+  for (let t1 = t0 + stepMs; t1 <= toMs; t1 += stepMs) {
+    const above1 = altDeg(new Date(t1)) >= thresholdDeg
+    if (above1 !== above0 && above1 === rising) {
+      let lo = t0
+      let hi = t1
+      const loAbove = above0
+      while (hi - lo > 60_000) {
+        const mid = Math.round((lo + hi) / 2)
+        if ((altDeg(new Date(mid)) >= thresholdDeg) === loAbove) lo = mid
+        else hi = mid
+      }
+      return new Date(Math.round((lo + hi) / 2))
+    }
+    t0 = t1
+    above0 = above1
+  }
+  return null
+}
+
+/** Time of `altDeg`'s maximum in `[fromMs, toMs]`, found at `stepMs`
+ *  resolution then refined to 1-minute resolution around the coarse peak. */
+function findTransit(
+  altDeg: (d: Date) => number, fromMs: number, toMs: number, stepMs: number,
+): Date {
+  let bestMs = fromMs
+  let bestAlt = altDeg(new Date(fromMs))
+  for (let t = fromMs + stepMs; t <= toMs; t += stepMs) {
+    const a = altDeg(new Date(t))
+    if (a > bestAlt) { bestAlt = a; bestMs = t }
+  }
+  const lo = Math.max(fromMs, bestMs - stepMs)
+  const hi = Math.min(toMs, bestMs + stepMs)
+  for (let t = lo; t <= hi; t += 60_000) {
+    const a = altDeg(new Date(t))
+    if (a > bestAlt) { bestAlt = a; bestMs = t }
+  }
+  return new Date(bestMs)
+}
+
+export interface AstroEvents {
+  sunrise: Date | null
+  sunset: Date | null
+  astroDusk: Date | null
+  astroDawn: Date | null
+  moonrise: Date | null
+  moonset: Date | null
+  moonTransit: Date
+}
+
+/** Sun/Moon rise, set, astronomical-twilight and moon-transit events within
+ *  `[from, to]`. Twilight fields are null when the sun's altitude never
+ *  reaches -18° in the window (e.g. midsummer at mid-to-high latitudes). */
+export function computeAstroEvents(from: Date, to: Date, latDeg: number, lonDeg: number): AstroEvents {
+  const fromMs = from.getTime()
+  const toMs = to.getTime()
+  const sunAlt = (d: Date) => {
+    const s = sunEquatorial(d)
+    return altitudeOf(d, s.raDeg, s.decDeg, latDeg, lonDeg)
+  }
+  const moonAlt = (d: Date) => {
+    const m = moonEquatorial(d)
+    return altitudeOf(d, m.raDeg, m.decDeg, latDeg, lonDeg)
+  }
+  return {
+    sunset: findCrossing(sunAlt, SUN_RISE_SET_ALT_DEG, false, fromMs, toMs, EVENT_STEP_MS),
+    astroDusk: findCrossing(sunAlt, ASTRO_TWILIGHT_ALT_DEG, false, fromMs, toMs, EVENT_STEP_MS),
+    astroDawn: findCrossing(sunAlt, ASTRO_TWILIGHT_ALT_DEG, true, fromMs, toMs, EVENT_STEP_MS),
+    sunrise: findCrossing(sunAlt, SUN_RISE_SET_ALT_DEG, true, fromMs, toMs, EVENT_STEP_MS),
+    moonset: findCrossing(moonAlt, MOON_RISE_SET_ALT_DEG, false, fromMs, toMs, EVENT_STEP_MS),
+    moonrise: findCrossing(moonAlt, MOON_RISE_SET_ALT_DEG, true, fromMs, toMs, EVENT_STEP_MS),
+    moonTransit: findTransit(moonAlt, fromMs, toMs, EVENT_STEP_MS),
+  }
+}
+
 /** Frame dimensions plus the camera's native sensor width, for plate scale. */
 export interface LensView {
   frameWidth: number

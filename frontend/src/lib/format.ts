@@ -22,6 +22,13 @@ export function formatBytes(bytes: number): string {
   return `${(mb / 1024).toFixed(2)} GB`
 }
 
+/** Local "HH:MM" for an ISO timestamp, or "—" when the event doesn't occur. */
+export function formatClockIso(iso: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
 export function formatUptime(sec: number): string {
   const d = Math.floor(sec / 86400)
   const h = Math.floor((sec % 86400) / 3600)

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  altAzToImage, altitudeOf, gmstDeg, julianDate, moonEquatorial,
+  altAzToImage, altitudeOf, computeAstroEvents, gmstDeg, julianDate, moonEquatorial,
   moonIllumination, raDecToAltAz, sunEquatorial, thetaToRadiusPx,
 } from './astro'
 import type { LensCalibration } from '../api/types'
@@ -127,5 +127,69 @@ describe('sun & moon', () => {
     expect(m.raDeg).toBeGreaterThanOrEqual(0)
     expect(m.raDeg).toBeLessThan(360)
     expect(Math.abs(m.decDeg)).toBeLessThanOrEqual(29)
+  })
+})
+
+describe('astro events (rise/set/twilight/transit)', () => {
+  const KYIV_LAT = 50.45
+  const KYIV_LON = 30.52
+
+  it('equinox Kyiv: sunset, astro dusk, astro dawn, sunrise all occur in order', () => {
+    const from = new Date(Date.UTC(2026, 2, 20, 12, 0))
+    const to = new Date(from.getTime() + 24 * 3_600_000)
+    const ev = computeAstroEvents(from, to, KYIV_LAT, KYIV_LON)
+    expect(ev.sunset).not.toBeNull()
+    expect(ev.astroDusk).not.toBeNull()
+    expect(ev.astroDawn).not.toBeNull()
+    expect(ev.sunrise).not.toBeNull()
+    expect(ev.sunset!.getTime()).toBeLessThan(ev.astroDusk!.getTime())
+    expect(ev.astroDusk!.getTime()).toBeLessThan(ev.astroDawn!.getTime())
+    expect(ev.astroDawn!.getTime()).toBeLessThan(ev.sunrise!.getTime())
+
+    const sunAlt = (d: Date) => {
+      const s = sunEquatorial(d)
+      return altitudeOf(d, s.raDeg, s.decDeg, KYIV_LAT, KYIV_LON)
+    }
+    expect(sunAlt(ev.sunset!)).toBeCloseTo(-0.833, 1)
+    expect(sunAlt(ev.sunrise!)).toBeCloseTo(-0.833, 1)
+    expect(sunAlt(ev.astroDusk!)).toBeCloseTo(-18, 1)
+    expect(sunAlt(ev.astroDawn!)).toBeCloseTo(-18, 1)
+  })
+
+  it('summer solstice Kyiv never reaches astronomical twilight', () => {
+    // At 50.45°N the sun's lower culmination near the June solstice stays
+    // above -18° (φ+δ-90 ≈ -16°): true astronomical night never begins.
+    const from = new Date(Date.UTC(2026, 5, 21, 12, 0))
+    const to = new Date(from.getTime() + 24 * 3_600_000)
+    const ev = computeAstroEvents(from, to, KYIV_LAT, KYIV_LON)
+    expect(ev.sunset).not.toBeNull()
+    expect(ev.sunrise).not.toBeNull()
+    expect(ev.astroDusk).toBeNull()
+    expect(ev.astroDawn).toBeNull()
+  })
+
+  it('moon transit is a local altitude maximum', () => {
+    const from = new Date(Date.UTC(2026, 2, 20, 12, 0))
+    const to = new Date(from.getTime() + 24 * 3_600_000)
+    const ev = computeAstroEvents(from, to, KYIV_LAT, KYIV_LON)
+    const moonAlt = (d: Date) => {
+      const m = moonEquatorial(d)
+      return altitudeOf(d, m.raDeg, m.decDeg, KYIV_LAT, KYIV_LON)
+    }
+    const atTransit = moonAlt(ev.moonTransit)
+    expect(atTransit).toBeGreaterThanOrEqual(moonAlt(new Date(ev.moonTransit.getTime() - 600_000)) - 1e-6)
+    expect(atTransit).toBeGreaterThanOrEqual(moonAlt(new Date(ev.moonTransit.getTime() + 600_000)) - 1e-6)
+  })
+
+  it('moonrise/moonset cross the horizon when present', () => {
+    const from = new Date(Date.UTC(2026, 2, 20, 12, 0))
+    const to = new Date(from.getTime() + 24 * 3_600_000)
+    const ev = computeAstroEvents(from, to, KYIV_LAT, KYIV_LON)
+    const moonAlt = (d: Date) => {
+      const m = moonEquatorial(d)
+      return altitudeOf(d, m.raDeg, m.decDeg, KYIV_LAT, KYIV_LON)
+    }
+    if (ev.moonrise) expect(Math.abs(moonAlt(ev.moonrise))).toBeLessThan(0.2)
+    if (ev.moonset) expect(Math.abs(moonAlt(ev.moonset))).toBeLessThan(0.2)
   })
 })

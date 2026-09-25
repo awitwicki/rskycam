@@ -109,6 +109,129 @@ pub fn moon_illumination(t: DateTime<Utc>) -> MoonIllumination {
     }
 }
 
+const SUN_RISE_SET_ALT_DEG: f64 = -0.833;
+const ASTRO_TWILIGHT_ALT_DEG: f64 = -18.0;
+const MOON_RISE_SET_ALT_DEG: f64 = 0.0;
+const EVENT_STEP: chrono::Duration = chrono::Duration::minutes(10);
+
+/// First crossing of `alt_fn(t)` through `threshold_deg` at or after `from`,
+/// scanning in `step` increments up to (not including) `to`; `rising`
+/// selects an ascending vs. descending crossing. Refined to ~1 minute via
+/// bisection. `None` if no such crossing occurs in the window.
+fn find_crossing<F: Fn(DateTime<Utc>) -> f64>(
+    alt_fn: &F,
+    threshold_deg: f64,
+    rising: bool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    step: chrono::Duration,
+) -> Option<DateTime<Utc>> {
+    let mut t0 = from;
+    let mut above0 = alt_fn(t0) >= threshold_deg;
+    let mut t1 = t0 + step;
+    while t1 <= to {
+        let above1 = alt_fn(t1) >= threshold_deg;
+        if above1 != above0 && above1 == rising {
+            let (mut lo, mut hi, lo_above) = (t0, t1, above0);
+            while hi - lo > chrono::Duration::minutes(1) {
+                let mid = lo + (hi - lo) / 2;
+                if (alt_fn(mid) >= threshold_deg) == lo_above {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            return Some(lo + (hi - lo) / 2);
+        }
+        t0 = t1;
+        above0 = above1;
+        t1 += step;
+    }
+    None
+}
+
+/// Time of `alt_fn`'s maximum in `[from, to]`, found at `step` resolution
+/// then refined to 1-minute resolution around the coarse peak.
+fn find_transit<F: Fn(DateTime<Utc>) -> f64>(
+    alt_fn: &F,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    step: chrono::Duration,
+) -> DateTime<Utc> {
+    let (mut best_t, mut best_alt) = (from, alt_fn(from));
+    let mut t = from + step;
+    while t <= to {
+        let a = alt_fn(t);
+        if a > best_alt {
+            (best_t, best_alt) = (t, a);
+        }
+        t += step;
+    }
+    let (lo, hi) = ((best_t - step).max(from), (best_t + step).min(to));
+    let mut t = lo;
+    let refine_step = chrono::Duration::minutes(1);
+    while t <= hi {
+        let a = alt_fn(t);
+        if a > best_alt {
+            (best_t, best_alt) = (t, a);
+        }
+        t += refine_step;
+    }
+    best_t
+}
+
+pub struct AstroEvents {
+    pub sunrise: Option<DateTime<Utc>>,
+    pub sunset: Option<DateTime<Utc>>,
+    pub astro_dusk: Option<DateTime<Utc>>,
+    pub astro_dawn: Option<DateTime<Utc>>,
+    pub moonrise: Option<DateTime<Utc>>,
+    pub moonset: Option<DateTime<Utc>>,
+    pub moon_transit: DateTime<Utc>,
+}
+
+/// Sun/Moon rise, set, astronomical-twilight and moon-transit events within
+/// `[from, to]`. Twilight fields are `None` when the sun's altitude never
+/// reaches -18° in the window (e.g. midsummer at mid-to-high latitudes).
+pub fn astro_events(
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    lat_deg: f64,
+    lon_deg: f64,
+) -> AstroEvents {
+    let sun_alt = |t: DateTime<Utc>| {
+        let s = sun_equatorial(t);
+        altitude_of(t, s.ra_deg, s.dec_deg, lat_deg, lon_deg)
+    };
+    let moon_alt = |t: DateTime<Utc>| {
+        let m = moon_equatorial(t);
+        altitude_of(t, m.ra_deg, m.dec_deg, lat_deg, lon_deg)
+    };
+    AstroEvents {
+        sunset: find_crossing(&sun_alt, SUN_RISE_SET_ALT_DEG, false, from, to, EVENT_STEP),
+        astro_dusk: find_crossing(
+            &sun_alt,
+            ASTRO_TWILIGHT_ALT_DEG,
+            false,
+            from,
+            to,
+            EVENT_STEP,
+        ),
+        astro_dawn: find_crossing(&sun_alt, ASTRO_TWILIGHT_ALT_DEG, true, from, to, EVENT_STEP),
+        sunrise: find_crossing(&sun_alt, SUN_RISE_SET_ALT_DEG, true, from, to, EVENT_STEP),
+        moonset: find_crossing(
+            &moon_alt,
+            MOON_RISE_SET_ALT_DEG,
+            false,
+            from,
+            to,
+            EVENT_STEP,
+        ),
+        moonrise: find_crossing(&moon_alt, MOON_RISE_SET_ALT_DEG, true, from, to, EVENT_STEP),
+        moon_transit: find_transit(&moon_alt, from, to, EVENT_STEP),
+    }
+}
+
 /// Frame dimensions plus the camera's native sensor width, for plate scale.
 #[derive(Clone, Copy, Debug)]
 pub struct LensView {
@@ -216,8 +339,8 @@ pub fn alt_az_to_image(
 #[cfg(test)]
 mod tests {
     use super::{
-        alt_az_to_image, altitude_of, gmst_deg, julian_date, moon_equatorial, moon_illumination,
-        ra_dec_to_alt_az, sun_equatorial,
+        alt_az_to_image, altitude_of, astro_events, gmst_deg, julian_date, moon_equatorial,
+        moon_illumination, ra_dec_to_alt_az, sun_equatorial,
     };
     use chrono::TimeZone;
 
@@ -375,5 +498,75 @@ mod tests {
         let m = moon_equatorial(utc(2000, 1, 14, 0, 0));
         assert!((0.0..360.0).contains(&m.ra_deg));
         assert!(m.dec_deg.abs() <= 29.0);
+    }
+
+    const KYIV_LAT: f64 = 50.45;
+    const KYIV_LON: f64 = 30.52;
+
+    #[test]
+    fn astro_events_equinox_kyiv_all_events_present_and_ordered() {
+        let from = utc(2026, 3, 20, 12, 0);
+        let to = from + chrono::Duration::hours(24);
+        let ev = astro_events(from, to, KYIV_LAT, KYIV_LON);
+        let sunset = ev.sunset.expect("sunset");
+        let dusk = ev.astro_dusk.expect("astro dusk");
+        let dawn = ev.astro_dawn.expect("astro dawn");
+        let sunrise = ev.sunrise.expect("sunrise");
+        assert!(sunset < dusk && dusk < dawn && dawn < sunrise);
+
+        let sun_alt = |t| {
+            let s = sun_equatorial(t);
+            altitude_of(t, s.ra_deg, s.dec_deg, KYIV_LAT, KYIV_LON)
+        };
+        assert!((sun_alt(sunset) - (-0.833)).abs() < 0.1);
+        assert!((sun_alt(sunrise) - (-0.833)).abs() < 0.1);
+        assert!((sun_alt(dusk) - (-18.0)).abs() < 0.1);
+        assert!((sun_alt(dawn) - (-18.0)).abs() < 0.1);
+    }
+
+    #[test]
+    fn astro_events_summer_solstice_kyiv_has_no_astronomical_night() {
+        // At 50.45°N the sun's lower culmination near the June solstice
+        // stays above -18° (φ+δ-90 ≈ -16°): true astronomical night never
+        // begins.
+        let from = utc(2026, 6, 21, 12, 0);
+        let to = from + chrono::Duration::hours(24);
+        let ev = astro_events(from, to, KYIV_LAT, KYIV_LON);
+        assert!(ev.sunset.is_some());
+        assert!(ev.sunrise.is_some());
+        assert!(ev.astro_dusk.is_none());
+        assert!(ev.astro_dawn.is_none());
+    }
+
+    #[test]
+    fn astro_events_moon_transit_is_a_local_altitude_maximum() {
+        let from = utc(2026, 3, 20, 12, 0);
+        let to = from + chrono::Duration::hours(24);
+        let ev = astro_events(from, to, KYIV_LAT, KYIV_LON);
+        let moon_alt = |t| {
+            let m = moon_equatorial(t);
+            altitude_of(t, m.ra_deg, m.dec_deg, KYIV_LAT, KYIV_LON)
+        };
+        let at_transit = moon_alt(ev.moon_transit);
+        let ten_min = chrono::Duration::minutes(10);
+        assert!(at_transit >= moon_alt(ev.moon_transit - ten_min) - 1e-6);
+        assert!(at_transit >= moon_alt(ev.moon_transit + ten_min) - 1e-6);
+    }
+
+    #[test]
+    fn astro_events_moonrise_moonset_cross_the_horizon_when_present() {
+        let from = utc(2026, 3, 20, 12, 0);
+        let to = from + chrono::Duration::hours(24);
+        let ev = astro_events(from, to, KYIV_LAT, KYIV_LON);
+        let moon_alt = |t| {
+            let m = moon_equatorial(t);
+            altitude_of(t, m.ra_deg, m.dec_deg, KYIV_LAT, KYIV_LON)
+        };
+        if let Some(t) = ev.moonrise {
+            assert!(moon_alt(t).abs() < 0.2);
+        }
+        if let Some(t) = ev.moonset {
+            assert!(moon_alt(t).abs() < 0.2);
+        }
     }
 }

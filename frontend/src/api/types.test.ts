@@ -14,7 +14,13 @@ describe('api contract', () => {
           meteredMean: 98.5, meteredAreaPct: 100,
         },
       },
-      astro: { sunAltDeg: -32.5, moonAltDeg: 12.1, moonPhasePct: 64, moonWaxing: true },
+      astro: {
+        sunAltDeg: -32.5, moonAltDeg: 12.1, moonPhasePct: 64, moonWaxing: true,
+        sunriseIso: '2026-07-14T02:47:00Z', sunsetIso: '2026-07-13T18:12:00Z',
+        astroDuskIso: null, astroDawnIso: null,
+        moonriseIso: '2026-07-13T20:03:00Z', moonsetIso: null,
+        moonTransitIso: '2026-07-14T00:15:00Z',
+      },
       camera: { model: 'ZWO ASI120MM Mini', maxWidth: 1280, maxHeight: 960, minExposureUs: 32 },
       sensor: { state: 'ok', reading: { temperatureC: 8.4, pressureHpa: 1013.2, humidityPct: 62 } },
       system: {

@@ -52,7 +52,11 @@ const status: Status = {
     ramUsedMb: 500, ramTotalMb: 2000, diskUsedGb: 10, diskTotalGb: 100,
     uptimeSec: 60, undervoltageNow: false, undervoltageSinceBoot: false,
   },
-  astro: { sunAltDeg: -20, moonAltDeg: 10, moonPhasePct: 50, moonWaxing: true },
+  astro: {
+    sunAltDeg: -20, moonAltDeg: 10, moonPhasePct: 50, moonWaxing: true,
+    sunriseIso: null, sunsetIso: null, astroDuskIso: null, astroDawnIso: null,
+    moonriseIso: null, moonsetIso: null, moonTransitIso: '2026-07-14T00:00:00Z',
+  },
   camera: null,
   darksProgress: null,
   focus: { enabled: false, exposureUs: 1_000_000, gain: 1 },

@@ -8,7 +8,7 @@ import MoonPhaseIcon from '../components/MoonPhaseIcon'
 import OverlayCanvas from '../components/OverlayCanvas'
 import { Card, Toggle } from '../components/ui'
 import { useStatus } from '../hooks/useStatus'
-import { formatExposure, formatGain, formatUptime } from '../lib/format'
+import { formatClockIso, formatExposure, formatGain, formatUptime } from '../lib/format'
 
 type Tone = 'default' | 'ok' | 'warn' | 'danger'
 const toneText: Record<Tone, string> = {
@@ -167,6 +167,12 @@ export default function DashboardPage() {
                   {astro.moonWaxing ? 'waxing' : 'waning'}
                 </span>
               </div>
+            </div>
+            <div className="mt-2 flex flex-col gap-0.5 border-t border-line pt-2 font-mono text-[11px] text-fgdim">
+              <span>Sun {formatClockIso(astro.sunriseIso)} – {formatClockIso(astro.sunsetIso)}</span>
+              <span>Astro night {formatClockIso(astro.astroDuskIso)} – {formatClockIso(astro.astroDawnIso)}</span>
+              <span>Moon {formatClockIso(astro.moonriseIso)} – {formatClockIso(astro.moonsetIso)}</span>
+              <span>Moon transit {formatClockIso(astro.moonTransitIso)}</span>
             </div>
             {lightgraph && (
               <div className="mt-3">

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { formatExposure, formatUptime } from './format'
+import { formatClockIso, formatExposure, formatUptime } from './format'
 
 describe('formatExposure', () => {
   it('formats whole seconds', () => expect(formatExposure(30_000_000)).toBe('30 s'))
@@ -13,4 +13,14 @@ describe('formatUptime', () => {
   it('days+hours', () => expect(formatUptime(3 * 86400 + 4 * 3600 + 120)).toBe('3d 4h'))
   it('hours+minutes', () => expect(formatUptime(2 * 3600 + 300)).toBe('2h 5m'))
   it('minutes only', () => expect(formatUptime(240)).toBe('4m'))
+})
+
+describe('formatClockIso', () => {
+  it('formats an ISO timestamp as local HH:MM', () => {
+    const iso = new Date(2026, 2, 20, 6, 5).toISOString()
+    expect(formatClockIso(iso)).toBe('06:05')
+  })
+  it('renders a dash when the event does not occur', () => {
+    expect(formatClockIso(null)).toBe('—')
+  })
 })

@@ -101,6 +101,13 @@ describe('MockApi settings & overlay', () => {
     expect(status.astro.sunAltDeg).toBeLessThan(90)
     expect(status.astro.moonPhasePct).toBeGreaterThanOrEqual(0)
     expect(status.astro.moonPhasePct).toBeLessThanOrEqual(100)
+    expect(Number.isNaN(new Date(status.astro.moonTransitIso).getTime())).toBe(false)
+    for (const iso of [
+      status.astro.sunriseIso, status.astro.sunsetIso, status.astro.astroDuskIso,
+      status.astro.astroDawnIso, status.astro.moonriseIso, status.astro.moonsetIso,
+    ]) {
+      expect(iso === null || !Number.isNaN(new Date(iso).getTime())).toBe(true)
+    }
     const lg = await api.getLightgraph()
     expect(lg.sunAltDeg).toHaveLength(144)
     expect(lg.stepMinutes).toBe(10)

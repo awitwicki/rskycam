@@ -5,7 +5,7 @@ import type {
   OverlayRequest, PoleDetection, Settings, Status, TextFieldKind, UpdateInfo,
 } from '../types'
 import {
-  altitudeOf, moonEquatorial, moonIllumination, sunEquatorial,
+  altitudeOf, computeAstroEvents, moonEquatorial, moonIllumination, sunEquatorial,
 } from '../../lib/astro'
 import { formatExposure, formatGain } from '../../lib/format'
 import { buildOverlayGeometry, cropGeometry } from '../../lib/overlayGeometry'
@@ -174,11 +174,23 @@ export class MockApi implements ApiClient {
     const sun = sunEquatorial(now)
     const moon = moonEquatorial(now)
     const ill = moonIllumination(now)
+    const start = new Date()
+    start.setHours(12, 0, 0, 0)
+    if (now.getTime() < start.getTime()) start.setDate(start.getDate() - 1)
+    const end = new Date(start.getTime() + 24 * 3_600_000)
+    const ev = computeAstroEvents(start, end, latitudeDeg, longitudeDeg)
     return {
       sunAltDeg: altitudeOf(now, sun.raDeg, sun.decDeg, latitudeDeg, longitudeDeg),
       moonAltDeg: altitudeOf(now, moon.raDeg, moon.decDeg, latitudeDeg, longitudeDeg),
       moonPhasePct: ill.pct,
       moonWaxing: ill.waxing,
+      sunriseIso: ev.sunrise?.toISOString() ?? null,
+      sunsetIso: ev.sunset?.toISOString() ?? null,
+      astroDuskIso: ev.astroDusk?.toISOString() ?? null,
+      astroDawnIso: ev.astroDawn?.toISOString() ?? null,
+      moonriseIso: ev.moonrise?.toISOString() ?? null,
+      moonsetIso: ev.moonset?.toISOString() ?? null,
+      moonTransitIso: ev.moonTransit.toISOString(),
     }
   }
 

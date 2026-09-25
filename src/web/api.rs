@@ -26,6 +26,13 @@ pub struct AstroStatus {
     pub moon_alt_deg: f64,
     pub moon_phase_pct: f64,
     pub moon_waxing: bool,
+    pub sunrise_iso: Option<String>,
+    pub sunset_iso: Option<String>,
+    pub astro_dusk_iso: Option<String>,
+    pub astro_dawn_iso: Option<String>,
+    pub moonrise_iso: Option<String>,
+    pub moonset_iso: Option<String>,
+    pub moon_transit_iso: String,
 }
 
 #[derive(Serialize)]
@@ -50,16 +57,40 @@ pub struct Status {
     pub rtsp: crate::rtsp::RtspStatus,
 }
 
+/// `[start, start+24h)` in UTC for "tonight": the local noon most recently passed.
+fn local_noon_window_utc(now: DateTime<Local>) -> (DateTime<Utc>, DateTime<Utc>) {
+    let mut start = now
+        .with_hour(12)
+        .and_then(|t| t.with_minute(0))
+        .and_then(|t| t.with_second(0))
+        .and_then(|t| t.with_nanosecond(0))
+        .unwrap_or(now);
+    if now < start {
+        start -= chrono::Duration::days(1);
+    }
+    let start_utc = start.with_timezone(&Utc);
+    (start_utc, start_utc + chrono::Duration::hours(24))
+}
+
 fn astro_status(s: &Settings, now: DateTime<Utc>) -> AstroStatus {
     let (lat, lon) = (s.location.latitude_deg, s.location.longitude_deg);
     let sun = astro::sun_equatorial(now);
     let moon = astro::moon_equatorial(now);
     let ill = astro::moon_illumination(now);
+    let (win_start, win_end) = local_noon_window_utc(Local::now());
+    let ev = astro::astro_events(win_start, win_end, lat, lon);
     AstroStatus {
         sun_alt_deg: astro::altitude_of(now, sun.ra_deg, sun.dec_deg, lat, lon),
         moon_alt_deg: astro::altitude_of(now, moon.ra_deg, moon.dec_deg, lat, lon),
         moon_phase_pct: ill.pct,
         moon_waxing: ill.waxing,
+        sunrise_iso: ev.sunrise.map(|t| t.to_rfc3339()),
+        sunset_iso: ev.sunset.map(|t| t.to_rfc3339()),
+        astro_dusk_iso: ev.astro_dusk.map(|t| t.to_rfc3339()),
+        astro_dawn_iso: ev.astro_dawn.map(|t| t.to_rfc3339()),
+        moonrise_iso: ev.moonrise.map(|t| t.to_rfc3339()),
+        moonset_iso: ev.moonset.map(|t| t.to_rfc3339()),
+        moon_transit_iso: ev.moon_transit.to_rfc3339(),
     }
 }
 
@@ -635,6 +666,17 @@ mod tests {
         assert_eq!(v["capture"]["state"], "idle");
         assert!(v["astro"]["sunAltDeg"].is_number());
         assert!(v["astro"]["moonPhasePct"].is_number());
+        assert!(v["astro"]["moonTransitIso"].is_string());
+        for f in [
+            "sunriseIso",
+            "sunsetIso",
+            "astroDuskIso",
+            "astroDawnIso",
+            "moonriseIso",
+            "moonsetIso",
+        ] {
+            assert!(v["astro"][f].is_string() || v["astro"][f].is_null(), "{f}");
+        }
         assert_eq!(v["sensor"]["state"], "not_detected"); // enabled by default, no hardware in tests
         assert!(v["sensor"]["reading"].is_null());
         assert!(v["system"]["ramTotalMb"].is_number());

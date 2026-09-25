@@ -49,6 +49,22 @@ describe('DashboardPage', () => {
     await waitFor(() => expect(screen.getByText(/sensor not detected/i)).toBeInTheDocument())
     expect(screen.getByText(/weather/i)).toBeInTheDocument()
   })
+
+  it('shows sunrise/sunset, astro night and moon rise/set/transit in the Sky card', async () => {
+    setApi(apiWith({
+      astro: {
+        sunAltDeg: -20, moonAltDeg: 10, moonPhasePct: 50, moonWaxing: true,
+        sunriseIso: '2026-07-14T02:47:00Z', sunsetIso: '2026-07-13T18:12:00Z',
+        astroDuskIso: null, astroDawnIso: null,
+        moonriseIso: '2026-07-13T20:03:00Z', moonsetIso: null,
+        moonTransitIso: '2026-07-14T00:15:00Z',
+      },
+    }))
+    render(<DashboardPage />)
+    await waitFor(() => expect(screen.getByText(/sky/i)).toBeInTheDocument())
+    expect(screen.getByText(/astro night/i).textContent).toContain('—') // astro dusk/dawn absent this night
+    expect(screen.getByText(/moon transit/i)).toBeInTheDocument()
+  })
 })
 
 /** MockApi with a status override; subscribe is silenced so the patch sticks. */

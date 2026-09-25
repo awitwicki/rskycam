@@ -69,6 +69,13 @@ export interface AstroStatus {
   moonAltDeg: number
   moonPhasePct: number // 0..100 illuminated
   moonWaxing: boolean
+  sunriseIso: string | null
+  sunsetIso: string | null
+  astroDuskIso: string | null // start of astronomical night; null if the sun never reaches -18°
+  astroDawnIso: string | null // end of astronomical night; null if the sun never reaches -18°
+  moonriseIso: string | null
+  moonsetIso: string | null
+  moonTransitIso: string
 }
 
 export interface CameraCaps {
