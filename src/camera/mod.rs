@@ -116,6 +116,7 @@ mod tests {
             mask_center_y_px: cy,
             mask_radius_px: r,
             crop: None,
+            meter_polygons: Vec::new(),
         }
     }
 

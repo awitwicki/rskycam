@@ -4,6 +4,8 @@ export interface FrameMeta {
   exposureUs: number
   gain: number
   isNight: boolean
+  meteredMean: number // what auto-exposure measured, 0..255
+  meteredAreaPct: number // share of the frame it measured; 100 = whole frame
 }
 
 export type CaptureState = 'capturing' | 'camera_unavailable' | 'idle' | 'focusing'
@@ -185,12 +187,24 @@ export interface CropRect {
   height: number
 }
 
+/** A metering-mask vertex. 0..1 fraction of the raw sensor frame, not pixels. */
+export interface MeterPoint {
+  x: number
+  y: number
+}
+
+/** A region auto-exposure is allowed to measure. Min 3 points, max 64. */
+export interface MeterPolygon {
+  points: MeterPoint[]
+}
+
 export interface ImageSettings {
   maskMode: MaskMode // 'circle' = black mask outside the manual circle below
   maskCenterXPx: number // mask circle center, sensor-frame px (set by hand)
   maskCenterYPx: number
   maskRadiusPx: number // mask circle radius, px
   crop: CropRect | null // null = full frame; applied last in the pipeline
+  meterPolygons: MeterPolygon[] // empty = meter the whole frame (max 8 regions)
 }
 
 // ── lens calibration ──────────────────────────────────────────

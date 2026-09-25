@@ -1,4 +1,4 @@
-import type { CropRect, ImageSettings, LensCalibration } from '../api/types'
+import type { CropRect, ImageSettings, LensCalibration, MeterPolygon } from '../api/types'
 import {
   altAzToImage, camBasis, focalLengthPx, opticalCenter, thetaMaxDeg, type LensView, type Vec3,
 } from './astro'
@@ -332,4 +332,99 @@ export function solveAimFromPole(
   if (residual(fixedPoint) <= 2) return fixedPoint
   const newton = newtonTiltedAim(poleXPx, poleYPx, cal, view, pole)
   return residual(newton) <= 2 ? newton : null
+}
+
+/** `meter:<regionIndex>:<pointIndex>` */
+export type MeterHandle = `meter:${number}:${number}`
+
+/** Mirrors MAX_METER_REGIONS / MAX_METER_POINTS in src/settings.rs — the
+ *  editor must not build something sanitize would throw away on save. */
+export const MAX_METER_REGIONS = 8
+export const MAX_METER_POINTS = 64
+const MIN_METER_POINTS = 3
+
+export function meterHitTest(
+  x: number, y: number, polys: MeterPolygon[], w: number, h: number, tolPx = 24,
+): MeterHandle | null {
+  // Last region first, so the most recently added one wins an overlap.
+  for (let r = polys.length - 1; r >= 0; r--) {
+    const pts = polys[r].points
+    for (let i = 0; i < pts.length; i++) {
+      if (Math.hypot(x - pts[i].x * w, y - pts[i].y * h) <= tolPx) {
+        return `meter:${r}:${i}`
+      }
+    }
+  }
+  return null
+}
+
+/** Move one vertex. Pointer pixels in, stored fractions out, clamped to the
+ *  frame so a vertex can never be dragged off it. */
+export function applyMeterDrag(
+  handle: MeterHandle, x: number, y: number, polys: MeterPolygon[],
+  w: number, h: number,
+): MeterPolygon[] {
+  const [, r, i] = handle.split(':')
+  const region = Number(r)
+  const index = Number(i)
+  const clamp = (v: number) => Math.min(1, Math.max(0, v))
+  return polys.map((p, k) => k !== region ? p : {
+    points: p.points.map((pt, j) => j !== index
+      ? pt
+      : { x: clamp(x / w), y: clamp(y / h) }),
+  })
+}
+
+/** Seed a region as a quad inset from the frame centre, ready to be dragged
+ *  into place. Each successive region is nudged diagonally by the current
+ *  region count so a second "Add region" click isn't visually identical to
+ *  the first — coincident quads would each open their own path (see
+ *  drawMeterRegions) but sit exactly on top of one another, making the two
+ *  regions indistinguishable on screen even though the backend still unions
+ *  them correctly. Clamped so a coordinate can never land outside 0..1. */
+export function addMeterRegion(polys: MeterPolygon[]): MeterPolygon[] {
+  if (polys.length >= MAX_METER_REGIONS) return polys
+  const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
+  const offset = 0.03 * polys.length
+  return [...polys, {
+    points: [
+      { x: clamp01(0.25 + offset), y: clamp01(0.25 + offset) },
+      { x: clamp01(0.75 + offset), y: clamp01(0.25 + offset) },
+      { x: clamp01(0.75 + offset), y: clamp01(0.75 + offset) },
+      { x: clamp01(0.25 + offset), y: clamp01(0.75 + offset) },
+    ],
+  }]
+}
+
+/** Split the region's longest edge at its midpoint. */
+export function addMeterVertex(polys: MeterPolygon[], region: number): MeterPolygon[] {
+  const p = polys[region]
+  if (!p || p.points.length >= MAX_METER_POINTS) return polys
+  let best = 0
+  let bestLen = -1
+  for (let i = 0; i < p.points.length; i++) {
+    const a = p.points[i]
+    const b = p.points[(i + 1) % p.points.length]
+    const len = Math.hypot(b.x - a.x, b.y - a.y)
+    if (len > bestLen) { bestLen = len; best = i }
+  }
+  const a = p.points[best]
+  const b = p.points[(best + 1) % p.points.length]
+  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+  const points = [...p.points.slice(0, best + 1), mid, ...p.points.slice(best + 1)]
+  return polys.map((q, k) => (k === region ? { points } : q))
+}
+
+export function removeMeterVertex(
+  polys: MeterPolygon[], region: number, index: number,
+): MeterPolygon[] {
+  const p = polys[region]
+  if (!p || p.points.length <= MIN_METER_POINTS) return polys
+  return polys.map((q, k) => k !== region
+    ? q
+    : { points: q.points.filter((_, j) => j !== index) })
+}
+
+export function removeMeterRegion(polys: MeterPolygon[], region: number): MeterPolygon[] {
+  return polys.filter((_, k) => k !== region)
 }

@@ -77,6 +77,26 @@ pub struct CropRect {
     pub height: f64,
 }
 
+/// Caps on the metering mask. Mirrored in frontend/src/lib/editorMath.ts —
+/// the editor must not be able to build something sanitize would throw away.
+pub const MAX_METER_REGIONS: usize = 8;
+pub const MAX_METER_POINTS: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeterPoint {
+    /// 0..1 fraction of the raw sensor frame, NOT pixels — so the mask
+    /// survives a capture-resolution change.
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeterPolygon {
+    pub points: Vec<MeterPoint>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageSettings {
@@ -90,6 +110,10 @@ pub struct ImageSettings {
     #[serde(default = "default_mask_radius_px")]
     pub mask_radius_px: f64,
     pub crop: Option<CropRect>,
+    /// Regions auto-exposure is allowed to measure. Empty = whole frame,
+    /// which is what every config written before this feature means.
+    #[serde(default)]
+    pub meter_polygons: Vec<MeterPolygon>,
 }
 
 fn default_mask_center_x_px() -> f64 {
@@ -350,6 +374,7 @@ impl Default for Settings {
                 mask_center_y_px: 480.0,
                 mask_radius_px: 620.0,
                 crop: None,
+                meter_polygons: Vec::new(),
             },
             location: LocationSettings {
                 latitude_deg: 50.45,
@@ -468,6 +493,29 @@ impl Settings {
         if r.output_width != 0 {
             r.output_width = r.output_width.max(160);
         }
+
+        // Metering mask: finite, in range, non-degenerate, bounded. Order
+        // matters — truncate points first so a polygon cut down below three
+        // points is then dropped by the retain.
+        let img = &mut self.image;
+        img.meter_polygons.truncate(MAX_METER_REGIONS);
+        for poly in &mut img.meter_polygons {
+            poly.points.truncate(MAX_METER_POINTS);
+            for p in &mut poly.points {
+                // Map non-finite BEFORE clamping: clamp passes NaN through.
+                p.x = if p.x.is_finite() {
+                    p.x.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                p.y = if p.y.is_finite() {
+                    p.y.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+            }
+        }
+        img.meter_polygons.retain(|p| p.points.len() >= 3);
     }
 }
 
@@ -1083,5 +1131,119 @@ mod tests {
         let loaded = store.load_or_create("h").unwrap();
         assert_eq!(loaded.rtsp_username, "admin");
         assert_eq!(loaded.password_hash, "h"); // untouched by the rtsp defaulting
+    }
+
+    #[test]
+    fn config_without_meter_polygons_loads_as_whole_frame() {
+        // A fresh install meters the whole frame.
+        assert!(Settings::default().image.meter_polygons.is_empty());
+
+        // A config.toml written before this feature has no meterPolygons key.
+        // Build that text by serializing a real config and deleting the key,
+        // so the test keeps working as other settings sections grow.
+        let dir = TempDir::new().unwrap();
+        let store = SettingsStore::new(dir.path());
+        let cfg = store.load_or_create("h").unwrap();
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        let older: String = toml_str
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("meterPolygons"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!older.contains("meterPolygons"));
+
+        let back: ConfigFile =
+            toml::from_str(&older).expect("a config without the key must still load");
+        assert!(back.settings.image.meter_polygons.is_empty());
+    }
+
+    #[test]
+    fn sanitize_bounds_the_metering_mask() {
+        let mut s = Settings::default();
+        let pt = |x, y| crate::settings::MeterPoint { x, y };
+
+        s.image.meter_polygons = vec![
+            // out of range on both axes -> clamped into 0..1
+            MeterPolygon {
+                points: vec![pt(-3.0, 0.2), pt(4.0, 0.2), pt(0.5, 9.9)],
+            },
+            // only two points -> dropped entirely
+            MeterPolygon {
+                points: vec![pt(0.1, 0.1), pt(0.2, 0.2)],
+            },
+        ];
+        s.sanitize();
+
+        assert_eq!(
+            s.image.meter_polygons.len(),
+            1,
+            "the 2-point polygon must be dropped"
+        );
+        for p in &s.image.meter_polygons[0].points {
+            assert!(
+                (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y),
+                "{p:?}"
+            );
+        }
+
+        // Region cap: 9 valid polygons in, 8 out.
+        let square = MeterPolygon {
+            points: vec![pt(0.1, 0.1), pt(0.9, 0.1), pt(0.9, 0.9), pt(0.1, 0.9)],
+        };
+        s.image.meter_polygons = vec![square.clone(); 9];
+        s.sanitize();
+        assert_eq!(
+            s.image.meter_polygons.len(),
+            crate::settings::MAX_METER_REGIONS
+        );
+
+        // Point cap: 100 points in, 64 out.
+        s.image.meter_polygons = vec![MeterPolygon {
+            points: (0..100).map(|i| pt(i as f64 / 100.0, 0.5)).collect(),
+        }];
+        s.sanitize();
+        assert_eq!(
+            s.image.meter_polygons[0].points.len(),
+            crate::settings::MAX_METER_POINTS
+        );
+    }
+
+    #[test]
+    fn sanitize_replaces_non_finite_mask_coordinates() {
+        // A hand-edited config.toml or a bad API client can deliver nan/inf.
+        // f64::clamp returns NaN for a NaN input, so clamping alone would let it
+        // straight through into rasterisation, where every comparison is false
+        // and the mask silently covers nothing.
+        let mut s = Settings::default();
+        s.image.meter_polygons = vec![MeterPolygon {
+            points: vec![
+                crate::settings::MeterPoint {
+                    x: f64::NAN,
+                    y: 0.2,
+                },
+                crate::settings::MeterPoint {
+                    x: 0.8,
+                    y: f64::INFINITY,
+                },
+                crate::settings::MeterPoint {
+                    x: f64::NEG_INFINITY,
+                    y: 0.9,
+                },
+            ],
+        }];
+        s.sanitize();
+
+        let pts = &s.image.meter_polygons[0].points;
+        assert_eq!(pts.len(), 3, "the polygon itself must survive");
+        for p in pts {
+            assert!(
+                p.x.is_finite() && p.y.is_finite(),
+                "non-finite survived: {p:?}"
+            );
+            assert!(
+                (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y),
+                "{p:?}"
+            );
+        }
     }
 }

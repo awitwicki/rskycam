@@ -1,5 +1,6 @@
 pub mod auto_exposure;
 pub mod focus;
+pub mod meter;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,8 +13,8 @@ use serde::Serialize;
 use tokio::sync::{mpsc, watch, RwLock};
 
 use crate::camera::{
-    apply_crop, apply_mask_circle, encode_jpeg, mean_brightness, mock::MockCamera,
-    rpicam::RpiCamera, Camera, CameraError, CaptureParams, Frame,
+    apply_crop, apply_mask_circle, encode_jpeg, mock::MockCamera, rpicam::RpiCamera, Camera,
+    CameraError, CaptureParams, Frame,
 };
 use crate::overlay::astro;
 use crate::overlay::geometry;
@@ -56,6 +57,10 @@ pub struct FrameMeta {
     pub exposure_us: u64,
     pub gain: f64,
     pub is_night: bool,
+    /// What auto-exposure actually measured, and over how much of the frame.
+    /// 100.0 means the whole frame — no mask, or the degenerate fallback.
+    pub metered_mean: f64,
+    pub metered_area_pct: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -227,6 +232,8 @@ pub fn process_frame(
         exposure_us: frame.exposure_us,
         gain: frame.gain,
         is_night,
+        metered_mean: 0.0,
+        metered_area_pct: 100.0,
     };
     Ok((
         LatestFrame {
@@ -347,6 +354,10 @@ where
         // re-probing the camera.
         let mut camera: Option<CameraSlot> = None;
         let mut backoff = Duration::from_secs(1);
+        // Carried through spawn_blocking the same way the camera is — see the
+        // closure below. A panic loses it; the next iteration rebuilds it.
+        let mut meter: Option<crate::capture::meter::MeterCache> =
+            Some(crate::capture::meter::MeterCache::new());
         // Tracks whether the *previous* iteration was serving focus frames,
         // so the true->false transition (explicit disable or the 60s
         // no-viewer auto-exit inside FocusShared::active()) can clear
@@ -536,13 +547,15 @@ where
             // misbehaving driver) surfaces as a `JoinError` below instead of
             // taking down the supervisor task.
             let (driver, cam_w, cam_h, native_w, mut cam) = camera.take().expect("camera present");
+            let mut meter_cache = meter.take().expect("meter cache present");
             let join = tokio::task::spawn_blocking({
                 let s = s.clone();
                 let data_dir = data_dir.clone();
                 let tap = tap.clone();
                 move || {
                     let r = cam.capture(p).and_then(|frame| {
-                        let mean = mean_brightness(&frame.image);
+                        let metered = meter_cache.measure(&frame.image, &s.image.meter_polygons);
+                        let mean = metered.mean;
                         let taken = CaptureParams {
                             exposure_us: frame.exposure_us,
                             gain: frame.gain,
@@ -557,8 +570,10 @@ where
                             .then(|| crate::sensors::read_sensor(true).reading)
                             .flatten()
                             .map(|r| r.temperature_c);
-                        let (latest, clean) =
+                        let (mut latest, clean) =
                             process_frame(&frame, &s, &data_dir, driver, night, temp, native_w)?;
+                        latest.meta.metered_mean = metered.mean;
+                        latest.meta.metered_area_pct = metered.area_pct;
                         // Don't save frames auto-exposure is still hunting
                         // through — but a railed frame is not hunting: on a
                         // moonless night the sky sits below the deadband even
@@ -619,13 +634,13 @@ where
                         }
                         Ok((latest, mean, taken))
                     });
-                    (r, cam)
+                    (r, cam, meter_cache)
                 }
             })
             .await;
 
-            let (result, cam) = match join {
-                Ok(pair) => pair,
+            let (result, cam, meter_back) = match join {
+                Ok(triple) => triple,
                 Err(join_err) => {
                     tracing::error!(
                         "no frame: capture task panicked ({join_err}); re-probing camera"
@@ -636,6 +651,8 @@ where
                         Some(format!("capture task panicked: {join_err}")),
                     );
                     camera = None; // the Box was consumed by the closure; re-probe next round
+                                   // The cache was consumed by the closure, like the camera.
+                    meter = Some(crate::capture::meter::MeterCache::new());
                     tokio::select! {
                         _ = tokio::time::sleep(backoff) => {}
                         Some(()) = darks_cmd_rx.recv() => {
@@ -647,6 +664,7 @@ where
                 }
             };
             camera = Some((driver, cam_w, cam_h, native_w, cam));
+            meter = Some(meter_back);
 
             let (latest, mean, taken) = match result {
                 Ok(v) => v,

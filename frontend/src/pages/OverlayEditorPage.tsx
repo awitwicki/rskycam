@@ -2,18 +2,18 @@ import { Plus, Trash2, Wand2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import { getApi } from '../api/client'
 import type {
-  CropRect, ImageSettings, LensCalibration, LensType, MaskMode, NightSummary,
+  CropRect, ImageSettings, LensCalibration, LensType, MaskMode, MeterPolygon, NightSummary,
   OverlayGeometry, OverlayLayers, OverlaySettings, OverlayTextField, Settings,
   TextFieldKind,
 } from '../api/types'
 import { drawOverlay } from '../components/OverlayCanvas'
 import { Button, Card, NumberField, Toggle } from '../components/ui'
 import {
-  applyCenterPan, applyCropDrag, applyMaskDrag, applyRollDrag, applySkyPan,
-  applyWheelZoom, calibrationHitTest, cropHandlePositions, cropHitTest,
-  imageToAltAz, maskHandlePositions, maskHitTest, rollHandlePosition,
-  solveAimFromPole, textFieldHitTest,
-  type CalibrationTarget, type CropHandle, type MaskHandle, type TextFieldBox,
+  addMeterRegion, addMeterVertex, applyCenterPan, applyCropDrag, applyMaskDrag, applyMeterDrag,
+  applyRollDrag, applySkyPan, applyWheelZoom, calibrationHitTest, cropHandlePositions, cropHitTest,
+  imageToAltAz, MAX_METER_POINTS, MAX_METER_REGIONS, maskHandlePositions, maskHitTest, meterHitTest,
+  removeMeterRegion, removeMeterVertex, rollHandlePosition, solveAimFromPole, textFieldHitTest,
+  type CalibrationTarget, type CropHandle, type MaskHandle, type MeterHandle, type TextFieldBox,
 } from '../lib/editorMath'
 import { focalLengthPx, opticalCenter, type LensView } from '../lib/astro'
 import { useStatus } from '../hooks/useStatus'
@@ -24,9 +24,9 @@ import {
 } from '../lib/startrailsBackground'
 import { uid } from '../lib/uid'
 
-type EditorMode = 'calibrate' | 'crop'
+type EditorMode = 'calibrate' | 'crop' | 'meter'
 type TextTarget = `text:${string}`
-type DragTarget = CalibrationTarget | MaskHandle | CropHandle | TextTarget
+type DragTarget = CalibrationTarget | MaskHandle | CropHandle | TextTarget | MeterHandle
 
 function isCropHandle(h: DragTarget): h is CropHandle {
   return h === 'tl' || h === 'br'
@@ -38,6 +38,10 @@ function isMaskHandle(h: DragTarget): h is MaskHandle {
 
 function isTextTarget(h: DragTarget): h is TextTarget {
   return h.startsWith('text:')
+}
+
+function isMeterHandle(h: DragTarget): h is MeterHandle {
+  return typeof h === 'string' && h.startsWith('meter:')
 }
 
 /** With every layer off there is nothing on screen to calibrate — the
@@ -166,6 +170,51 @@ function drawCropOverlay(
   ctx.fillText(`${Math.round(crop.width)}×${Math.round(crop.height)}`, crop.x + 10, crop.y + crop.height - 10)
 }
 
+/** Filled = "auto-exposure measures here". Each polygon gets its own
+ *  beginPath()+fill('evenodd') so overlapping regions union visually,
+ *  matching the backend's per-polygon even-odd test unioned across regions
+ *  (`polys.iter().any(|p| contains(&p.points, fx, fy))` in
+ *  src/capture/meter.rs). A single even-odd fill over every subpath would
+ *  instead let two overlapping regions cancel each other on screen while the
+ *  backend still meters the overlap. evenodd is still right per polygon: a
+ *  self-intersecting region must render its hole the way the backend
+ *  computes it. */
+function drawMeterRegions(
+  ctx: CanvasRenderingContext2D, polys: MeterPolygon[],
+  w: number, h: number, active: boolean, selected: number, selectedPt: number,
+) {
+  if (polys.length === 0) return
+  ctx.save()
+  ctx.fillStyle = 'rgba(52, 211, 153, 0.18)'
+  ctx.strokeStyle = 'rgba(52, 211, 153, 0.9)'
+  ctx.lineWidth = 2
+  for (const p of polys) {
+    ctx.beginPath()
+    p.points.forEach((pt, i) => {
+      const x = pt.x * w
+      const y = pt.y * h
+      if (i === 0) ctx.moveTo(x, y)
+      else ctx.lineTo(x, y)
+    })
+    ctx.closePath()
+    ctx.fill('evenodd')
+    ctx.stroke()
+  }
+  if (active) {
+    polys.forEach((p, r) => {
+      p.points.forEach((pt, i) => {
+        // The bigger dot is the one "− vertex" will remove.
+        const chosen = r === selected && i === selectedPt
+        ctx.fillStyle = r === selected ? '#34d399' : 'rgba(52, 211, 153, 0.45)'
+        ctx.beginPath()
+        ctx.arc(pt.x * w, pt.y * h, chosen ? 9 : 6, 0, Math.PI * 2)
+        ctx.fill()
+      })
+    })
+  }
+  ctx.restore()
+}
+
 export default function OverlayEditorPage() {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [draft, setDraft] = useState<OverlaySettings | null>(null)
@@ -175,6 +224,8 @@ export default function OverlayEditorPage() {
   // from the loaded pointing and re-derivable from what gets saved.
   const [zenithMode, setZenithMode] = useState(true)
   const [dragging, setDragging] = useState<DragTarget | null>(null)
+  const [selectedRegion, setSelectedRegion] = useState(0)
+  const [selectedVertex, setSelectedVertex] = useState(0)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -298,6 +349,10 @@ export default function OverlayEditorPage() {
     ctx.globalAlpha = 1
     drawOverlay(ctx, { ...geometry, labels: geometry.labels.filter((l) => l.layer !== 'text') })
     if (draftImage.crop) drawCropOverlay(ctx, draftImage.crop, w, h, mode === 'crop')
+    drawMeterRegions(
+      ctx, draftImage.meterPolygons, w, h, mode === 'meter',
+      selectedRegion, selectedVertex,
+    )
     if (mode === 'calibrate') {
       if (anyLayerOn(draft.layers)) drawSkeleton(ctx, draft.calibration, view, zenithMode)
       if (draftImage.maskMode === 'circle') drawMaskHandles(ctx, draftImage)
@@ -305,7 +360,7 @@ export default function OverlayEditorPage() {
     } else {
       fieldBoxesRef.current = []
     }
-  }, [geometry, draft, draftImage, mode, status, view, zenithMode]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [geometry, draft, draftImage, mode, status, view, zenithMode, selectedRegion, selectedVertex]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Canvas only exists in the DOM once the initial load finishes (the
   // component renders a "Loading…" placeholder, with no canvas, until then).
@@ -368,7 +423,16 @@ export default function OverlayEditorPage() {
   const onPointerDown = (e: PointerEvent<HTMLCanvasElement>) => {
     const p = toImageCoords(e)
     let target: DragTarget | null
-    if (mode === 'crop') {
+    if (mode === 'meter') {
+      const w = geometry?.imageWidth ?? 1280
+      const h = geometry?.imageHeight ?? 960
+      target = meterHitTest(p.x, p.y, draftImage.meterPolygons, w, h)
+      if (target) {
+        const [, r, i] = target.split(':')
+        setSelectedRegion(Number(r))
+        setSelectedVertex(Number(i))
+      }
+    } else if (mode === 'crop') {
       target = draftImage.crop ? cropHitTest(p.x, p.y, draftImage.crop) : null
     } else {
       // The N rotation handle exists only in zenith mode. With all layers
@@ -397,6 +461,13 @@ export default function OverlayEditorPage() {
         : d)
     } else if (isMaskHandle(dragging)) {
       setDraftImage((d) => d && applyMaskDrag(dragging, p.x, p.y, d))
+    } else if (isMeterHandle(dragging)) {
+      const w = geometry?.imageWidth ?? 1280
+      const h = geometry?.imageHeight ?? 960
+      setDraftImage((d) => d && {
+        ...d,
+        meterPolygons: applyMeterDrag(dragging, p.x, p.y, d.meterPolygons, w, h),
+      })
     } else if (isTextTarget(dragging)) {
       const { dx, dy } = grabOffsetRef.current
       updateField(dragging.slice(5), {
@@ -637,6 +708,103 @@ export default function OverlayEditorPage() {
                   crop {Math.round(crop.x)},{Math.round(crop.y)} · {Math.round(crop.width)}×{Math.round(crop.height)} px
                 </p>
               </>
+            )}
+            <div className="flex gap-2">
+              <Button variant={mode === 'meter' ? 'primary' : 'ghost'}
+                onClick={() => setMode(mode === 'meter' ? 'calibrate' : 'meter')}
+                className="flex-1 !py-1.5 text-xs">
+                Metering mask
+              </Button>
+            </div>
+            {mode === 'meter' && (
+              <div className="flex flex-col gap-2">
+                <p className="text-xs text-fgdim">
+                  Auto-exposure measures only inside these regions. Drag the corners
+                  onto the sky so a wall or a streetlight stops setting your exposure.
+                </p>
+                {draftImage.meterPolygons.length === 0 ? (
+                  <p className="text-xs text-fgdim">
+                    No regions — auto-exposure measures the whole frame.
+                  </p>
+                ) : (
+                  draftImage.meterPolygons.map((p, r) => (
+                    <div key={r} className="flex items-center gap-2 text-xs">
+                      <button onClick={() => { setSelectedRegion(r); setSelectedVertex(0) }}
+                        className={r === selectedRegion ? 'text-ok' : 'text-fgdim'}>
+                        Region {r + 1} · {p.points.length} pts
+                      </button>
+                      {/* Only the selected region's row gets controls — the canvas's
+                          "bigger dot" cue and the − vertex button must always agree
+                          on which vertex is about to go, which is only guaranteed
+                          when both are driven by the same selectedRegion. */}
+                      {r === selectedRegion && (
+                        <>
+                          <Button variant="ghost" className="!py-1 text-xs"
+                            disabled={p.points.length >= MAX_METER_POINTS}
+                            onClick={() => {
+                              const meterPolygons = addMeterVertex(draftImage.meterPolygons, r)
+                              setDraftImage({ ...draftImage, meterPolygons })
+                              // Reset to a valid index: the canvas's "bigger
+                              // dot" and this handler must always agree on
+                              // which vertex is selected (see − vertex).
+                              const len = meterPolygons[r]?.points.length ?? 0
+                              setSelectedVertex((v) => Math.min(v, Math.max(0, len - 1)))
+                            }}>
+                            + vertex
+                          </Button>
+                          <Button variant="ghost" className="!py-1 text-xs"
+                            onClick={() => {
+                              // Clamp: the selection can outlive a shorter region.
+                              const removeIdx = Math.min(selectedVertex, p.points.length - 1)
+                              const meterPolygons = removeMeterVertex(draftImage.meterPolygons, r, removeIdx)
+                              setDraftImage({ ...draftImage, meterPolygons })
+                              // Reset selectedVertex to a valid index so the
+                              // enlarged dot always points at the vertex the
+                              // next click will remove — otherwise, after
+                              // removing the last-indexed vertex, no dot is
+                              // enlarged and the following click silently
+                              // removes an unindicated one.
+                              const len = meterPolygons[r]?.points.length ?? 0
+                              setSelectedVertex((v) => Math.min(v, Math.max(0, len - 1)))
+                            }}>
+                            − vertex
+                          </Button>
+                          <Button variant="ghost" className="!py-1 text-xs"
+                            onClick={() => {
+                              const meterPolygons = removeMeterRegion(draftImage.meterPolygons, r)
+                              setDraftImage({ ...draftImage, meterPolygons })
+                              // Clamp: deleting the selected region can leave the
+                              // index pointing past the end of the shorter array.
+                              setSelectedRegion((sr) => Math.max(0, Math.min(sr, meterPolygons.length - 1)))
+                              setSelectedVertex(0)
+                            }}>
+                            Delete
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  ))
+                )}
+                <Button variant="ghost" className="!py-1.5 text-xs"
+                  disabled={draftImage.meterPolygons.length >= MAX_METER_REGIONS}
+                  onClick={() => setDraftImage((d) => d && {
+                    ...d, meterPolygons: addMeterRegion(d.meterPolygons),
+                  })}>
+                  Add region
+                </Button>
+                {status?.capture.lastFrame && (
+                  // This is the SAVED mask, from the last real capture — not
+                  // the draft above. It can't be computed client-side (the
+                  // point-in-polygon math stays server-only, see
+                  // src/capture/meter.rs), so unsaved edits just aren't
+                  // reflected here yet, rather than being wrong.
+                  <p className="font-mono text-xs text-fgdim">
+                    last capture under the saved mask: measured{' '}
+                    {status.capture.lastFrame.meteredMean.toFixed(0)} over{' '}
+                    {status.capture.lastFrame.meteredAreaPct.toFixed(0)}% of frame
+                  </p>
+                )}
+              </div>
             )}
           </div>
         </Card>

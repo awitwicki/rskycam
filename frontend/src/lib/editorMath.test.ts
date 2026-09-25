@@ -131,6 +131,7 @@ describe('applyCenterPan', () => {
 describe('mask circle handles', () => {
   const img: ImageSettings = {
     maskMode: 'circle', maskCenterXPx: 640, maskCenterYPx: 480, maskRadiusPx: 620, crop: null,
+    meterPolygons: [],
   }
 
   it('positions: center dot and a radius dot on the east edge', () => {
@@ -252,5 +253,93 @@ describe('solveAimFromPole', () => {
     // starting pointing — exercises solveAimFromPole's own null return via
     // the newtonTiltedAim path, not just the zenith branch.
     expect(solveAimFromPole(100_000, 100_000, base, view, 50, false)).toBeNull()
+  })
+})
+
+import {
+  MAX_METER_POINTS, MAX_METER_REGIONS, addMeterRegion, addMeterVertex,
+  applyMeterDrag, meterHitTest, removeMeterRegion, removeMeterVertex,
+} from './editorMath'
+import type { MeterPolygon } from '../api/types'
+
+const quad = (): MeterPolygon[] => [{
+  points: [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.2 }, { x: 0.8, y: 0.8 }, { x: 0.2, y: 0.8 }],
+}]
+
+describe('metering regions', () => {
+  it('seeds a centred quad and honours the region cap', () => {
+    let polys: MeterPolygon[] = []
+    polys = addMeterRegion(polys)
+    expect(polys).toHaveLength(1)
+    expect(polys[0].points).toHaveLength(4)
+    for (const p of polys[0].points) {
+      expect(p.x).toBeGreaterThan(0)
+      expect(p.x).toBeLessThan(1)
+    }
+    for (let i = 1; i < MAX_METER_REGIONS + 3; i++) polys = addMeterRegion(polys)
+    expect(polys).toHaveLength(MAX_METER_REGIONS)
+  })
+
+  it('hit-tests vertices in pixel space and drags them in fraction space', () => {
+    // 1000x500 frame: the first vertex sits at (200, 100) px.
+    expect(meterHitTest(203, 104, quad(), 1000, 500)).toBe('meter:0:0')
+    expect(meterHitTest(600, 250, quad(), 1000, 500)).toBeNull()
+
+    const moved = applyMeterDrag('meter:0:0', 500, 250, quad(), 1000, 500)
+    expect(moved[0].points[0]).toEqual({ x: 0.5, y: 0.5 })
+    expect(moved[0].points[1]).toEqual({ x: 0.8, y: 0.2 }) // others untouched
+  })
+
+  it('clamps a vertex dragged outside the frame', () => {
+    const out = applyMeterDrag('meter:0:0', -300, 9999, quad(), 1000, 500)
+    expect(out[0].points[0]).toEqual({ x: 0, y: 1 })
+  })
+
+  it('splits the longest edge and honours the point cap', () => {
+    // A wide-but-short quad: the longest edges are the horizontal ones.
+    let polys: MeterPolygon[] = [{
+      points: [{ x: 0.1, y: 0.4 }, { x: 0.9, y: 0.4 }, { x: 0.9, y: 0.5 }, { x: 0.1, y: 0.5 }],
+    }]
+    polys = addMeterVertex(polys, 0)
+    expect(polys[0].points).toHaveLength(5)
+    expect(polys[0].points[1]).toEqual({ x: 0.5, y: 0.4 }) // midpoint of edge 0
+
+    while (polys[0].points.length < MAX_METER_POINTS) polys = addMeterVertex(polys, 0)
+    polys = addMeterVertex(polys, 0)
+    expect(polys[0].points).toHaveLength(MAX_METER_POINTS)
+  })
+
+  it('offsets each newly seeded region so consecutive regions are not coincident', () => {
+    // Two coincident quads (identical subpaths) is exactly what made the
+    // whole green fill vanish under an even-odd fill — see drawMeterRegions
+    // in OverlayEditorPage.tsx and Finding 1 of the 2026-09-25 review.
+    let polys: MeterPolygon[] = []
+    polys = addMeterRegion(polys)
+    polys = addMeterRegion(polys)
+    expect(polys[1].points).not.toEqual(polys[0].points)
+
+    for (let i = 2; i < MAX_METER_REGIONS; i++) polys = addMeterRegion(polys)
+    expect(polys).toHaveLength(MAX_METER_REGIONS)
+    for (let i = 1; i < polys.length; i++) {
+      expect(polys[i].points).not.toEqual(polys[i - 1].points)
+    }
+    for (const region of polys) {
+      for (const p of region.points) {
+        expect(p.x).toBeGreaterThanOrEqual(0)
+        expect(p.x).toBeLessThanOrEqual(1)
+        expect(p.y).toBeGreaterThanOrEqual(0)
+        expect(p.y).toBeLessThanOrEqual(1)
+      }
+    }
+  })
+
+  it('refuses to take a region below three points, and deletes regions', () => {
+    let polys = quad()
+    polys = removeMeterVertex(polys, 0, 0)
+    expect(polys[0].points).toHaveLength(3)
+    polys = removeMeterVertex(polys, 0, 0)
+    expect(polys[0].points).toHaveLength(3) // floor held
+
+    expect(removeMeterRegion(polys, 0)).toHaveLength(0)
   })
 })

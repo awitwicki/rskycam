@@ -1117,6 +1117,8 @@ mod tests {
             exposure_us: 30_000_000,
             gain: 8.0,
             is_night: true,
+            metered_mean: 0.0,
+            metered_area_pct: 100.0,
         };
         let v: serde_json::Value = serde_json::from_str(&super::frame_event_json(&meta)).unwrap();
         assert!(v["imageUrl"]
@@ -1125,6 +1127,21 @@ mod tests {
             .starts_with("/api/latest.jpg?ts="));
         assert_eq!(v["meta"]["exposureUs"], 30_000_000);
         assert_eq!(v["meta"]["isNight"], true);
+    }
+
+    #[test]
+    fn frame_event_json_carries_the_metered_fields() {
+        let meta = crate::capture::FrameMeta {
+            timestamp: "2026-09-25T21:00:00Z".into(),
+            exposure_us: 1_000_000,
+            gain: 4.0,
+            is_night: true,
+            metered_mean: 98.5,
+            metered_area_pct: 42.0,
+        };
+        let json = super::frame_event_json(&meta);
+        assert!(json.contains("\"meteredMean\":98.5"), "{json}");
+        assert!(json.contains("\"meteredAreaPct\":42.0"), "{json}");
     }
 
     fn test_focus_frame() -> std::sync::Arc<crate::capture::focus::FocusFrame> {

@@ -27,7 +27,10 @@ export function defaultSettings(): Settings {
       captureDuringDay: false, captureWidth: 1640, captureHeight: 1232,
     },
     // Mask circle defaults match the old mock's 620 px image circle.
-    image: { maskMode: 'none', maskCenterXPx: 640, maskCenterYPx: 480, maskRadiusPx: 620, crop: null },
+    image: {
+      maskMode: 'none', maskCenterXPx: 640, maskCenterYPx: 480, maskRadiusPx: 620, crop: null,
+      meterPolygons: [],
+    },
     location: { latitudeDeg: 50.45, longitudeDeg: 30.52 },
     sensor: { enabled: true },
     overlay: {
@@ -159,7 +162,10 @@ export class MockApi implements ApiClient {
 
   // ── live status ──
   private frameMeta(time: Date): FrameMeta {
-    return { timestamp: time.toISOString(), exposureUs: 30_000_000, gain: 250, isNight: true }
+    return {
+      timestamp: time.toISOString(), exposureUs: 30_000_000, gain: 250, isNight: true,
+      meteredMean: 98.5, meteredAreaPct: 100,
+    }
   }
 
   private astroNow(): Status['astro'] {

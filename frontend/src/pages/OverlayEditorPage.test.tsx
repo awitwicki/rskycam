@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setApi } from '../api/client'
@@ -13,7 +13,10 @@ const settings: Settings = {
     manualExposureUs: 1_000_000, manualGain: 1, intervalSecDay: 60,
     intervalSecNight: 60, captureDuringDay: true, captureWidth: 1280, captureHeight: 960,
   },
-  image: { maskMode: 'none', maskCenterXPx: 640, maskCenterYPx: 480, maskRadiusPx: 620, crop: null },
+  image: {
+    maskMode: 'none', maskCenterXPx: 640, maskCenterYPx: 480, maskRadiusPx: 620, crop: null,
+    meterPolygons: [],
+  },
   location: { latitudeDeg: 50.45, longitudeDeg: 30.52 },
   sensor: { enabled: false },
   overlay: {
@@ -209,5 +212,132 @@ describe('OverlayEditorPage auto-align', () => {
     await userEvent.click(screen.getByRole('button', { name: /auto-align/i }))
     expect(await screen.findByText(/can.t map its coordinates/i)).toBeInTheDocument()
     expect(detectPole).not.toHaveBeenCalled()
+  })
+})
+
+describe('OverlayEditorPage metering mask', () => {
+  it('explains the default, then adds and trims a region', async () => {
+    setup([])
+    await userEvent.click(await screen.findByRole('button', { name: /metering mask/i }))
+
+    // With no regions the whole frame is metered — say so, rather than
+    // showing an empty panel the user has to interpret.
+    expect(screen.getByText(/whole frame/i)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /add region/i }))
+    expect(screen.getByText(/region 1 · 4 pts/i)).toBeInTheDocument()
+    expect(screen.queryByText(/whole frame/i)).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /\+ vertex/i }))
+    expect(screen.getByText(/region 1 · 5 pts/i)).toBeInTheDocument()
+
+    // Trimming stops at the 3-point floor rather than destroying the region.
+    const minus = screen.getByRole('button', { name: /− vertex/i })
+    await userEvent.click(minus)
+    await userEvent.click(minus)
+    await userEvent.click(minus)
+    expect(screen.getByText(/region 1 · 3 pts/i)).toBeInTheDocument()
+  })
+
+  it('scopes per-vertex controls to the selected region and clamps selection after delete', async () => {
+    setup([])
+    await userEvent.click(await screen.findByRole('button', { name: /metering mask/i }))
+
+    await userEvent.click(screen.getByRole('button', { name: /add region/i }))
+    await userEvent.click(screen.getByRole('button', { name: /add region/i }))
+    expect(screen.getByText(/region 1 · 4 pts/i)).toBeInTheDocument()
+    expect(screen.getByText(/region 2 · 4 pts/i)).toBeInTheDocument()
+
+    // Region 1 is selected by default (it was added first). Only the
+    // selected region's row may expose +/− vertex controls: the canvas's
+    // "bigger dot" cue is drawn only for the selected region, so a button
+    // that could act on some other, unshown region's vertex would disagree
+    // with what the user is actually shown.
+    const region2Row = screen.getByText(/region 2 · 4 pts/i).closest('div')!
+    expect(within(region2Row).queryByRole('button', { name: /− vertex/i })).not.toBeInTheDocument()
+    expect(within(region2Row).queryByRole('button', { name: /\+ vertex/i })).not.toBeInTheDocument()
+    expect(within(region2Row).queryByRole('button', { name: /delete/i })).not.toBeInTheDocument()
+
+    // Give region 1 a different point count than region 2, then switch
+    // selection to region 2 and trim it from there. The right region must
+    // change (region 1 stays at 5), not whatever region was selected before.
+    await userEvent.click(screen.getByRole('button', { name: /\+ vertex/i }))
+    expect(screen.getByText(/region 1 · 5 pts/i)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByText(/region 2 · 4 pts/i))
+    await userEvent.click(within(region2Row).getByRole('button', { name: /− vertex/i }))
+    expect(screen.getByText(/region 1 · 5 pts/i)).toBeInTheDocument() // untouched
+    expect(screen.getByText(/region 2 · 3 pts/i)).toBeInTheDocument()
+
+    // Delete the still-selected region 2 — selection must clamp back onto
+    // the one remaining region rather than pointing past the end of the
+    // (now shorter) array, which would leave no row showing controls.
+    await userEvent.click(within(region2Row).getByRole('button', { name: /delete/i }))
+    expect(screen.queryByText(/region 2/i)).not.toBeInTheDocument()
+    const region1Row = screen.getByText(/region 1 · 5 pts/i).closest('div')!
+    expect(within(region1Row).getByRole('button', { name: /\+ vertex/i })).toBeInTheDocument()
+
+    // Deleting the last remaining region returns to the empty state.
+    await userEvent.click(within(region1Row).getByRole('button', { name: /delete/i }))
+    expect(screen.getByText(/whole frame/i)).toBeInTheDocument()
+  })
+
+  it('keeps the enlarged vertex dot valid after − vertex, so the next click removes the shown one', async () => {
+    // jsdom has neither of these; the editor canvas calls both on pointer
+    // down/up during a real drag.
+    if (!HTMLElement.prototype.setPointerCapture) {
+      HTMLElement.prototype.setPointerCapture = () => {}
+      HTMLElement.prototype.releasePointerCapture = () => {}
+    }
+    const rect = {
+      left: 0, top: 0, width: 1280, height: 960, right: 1280, bottom: 960, x: 0, y: 0,
+      toJSON: () => ({}),
+    } as DOMRect
+    vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockReturnValue(rect)
+    // The stubbed 2D context in src/test/setup.ts is a single shared object
+    // returned by every canvas.getContext('2d') call, so spying on its arc()
+    // catches every dot drawMeterRegions draws, across every re-render.
+    const ctx = document.createElement('canvas').getContext('2d')!
+    const arcSpy = vi.spyOn(ctx, 'arc')
+    const lastEnlarged = () => {
+      const calls = arcSpy.mock.calls.filter((c) => c[2] === 9) // radius 9 = "chosen" dot
+      return calls.length ? calls[calls.length - 1] : null
+    }
+
+    setup([])
+    await userEvent.click(await screen.findByRole('button', { name: /metering mask/i }))
+    await userEvent.click(screen.getByRole('button', { name: /add region/i }))
+    // Quad (0.25,0.25) (0.75,0.25) (0.75,0.75) (0.25,0.75) — all edges equal
+    // length, so the longest-edge split picks the first edge and inserts its
+    // midpoint after index 0: (0.25,0.25) (0.5,0.25) (0.75,0.25) (0.75,0.75)
+    // (0.25,0.75). Index 4, the region's last point, is (0.25, 0.75).
+    await userEvent.click(screen.getByRole('button', { name: /\+ vertex/i }))
+    expect(screen.getByText(/region 1 · 5 pts/i)).toBeInTheDocument()
+
+    const canvas = document.querySelector('canvas')!
+    fireEvent.pointerDown(canvas, { clientX: 0.25 * 1280, clientY: 0.75 * 960, pointerId: 1 })
+    fireEvent.pointerUp(canvas, { pointerId: 1 })
+    expect(lastEnlarged()).toEqual([320, 720, 9, 0, Math.PI * 2])
+
+    const minus = screen.getByRole('button', { name: /− vertex/i })
+    await userEvent.click(minus)
+    expect(screen.getByText(/region 1 · 4 pts/i)).toBeInTheDocument()
+    // Index 4 is gone (only 0..3 remain) — the selection must have been
+    // reset to a valid index (3, the new last point at (0.75,0.75) = pixel
+    // (960,720)), not left dangling at 4 with nothing drawn enlarged.
+    expect(lastEnlarged()).toEqual([960, 720, 9, 0, Math.PI * 2])
+
+    const callsBeforeSecondClick = arcSpy.mock.calls.length
+    await userEvent.click(minus)
+    expect(screen.getByText(/region 1 · 3 pts/i)).toBeInTheDocument()
+    // The second click must remove the vertex that was actually shown
+    // enlarged — (0.75,0.75) — not some other, unindicated one. Only the
+    // dots drawn by THIS click's render matter here: earlier renders drew a
+    // (non-enlarged) dot at that same pixel too, back when it was a
+    // still-present vertex.
+    const drawnThisRender = arcSpy.mock.calls.slice(callsBeforeSecondClick)
+    expect(drawnThisRender.some((c) => c[0] === 960 && c[1] === 720)).toBe(false)
+    // And the invariant holds again: a new, still-valid vertex is enlarged.
+    expect(lastEnlarged()).toEqual([960, 240, 9, 0, Math.PI * 2])
   })
 })

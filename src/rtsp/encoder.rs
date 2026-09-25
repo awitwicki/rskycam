@@ -279,6 +279,8 @@ mod tests {
                 exposure_us: 1000,
                 gain: 1.0,
                 is_night: true,
+                metered_mean: 0.0,
+                metered_area_pct: 100.0,
             },
         })
     }

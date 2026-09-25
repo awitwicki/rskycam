@@ -101,6 +101,10 @@ export default function DashboardPage() {
             <span>{new Date(frame.meta.timestamp).toLocaleTimeString()}</span>
             <span>exp {formatExposure(frame.meta.exposureUs)}</span>
             <span>gain {formatGain(frame.meta.gain)}</span>
+            <span>mean {frame.meta.meteredMean.toFixed(0)}</span>
+            {frame.meta.meteredAreaPct < 99.5 && (
+              <span>metered {frame.meta.meteredAreaPct.toFixed(0)}% of frame</span>
+            )}
             <span>{frame.meta.isNight ? 'night' : 'day'}</span>
           </div>
         )}

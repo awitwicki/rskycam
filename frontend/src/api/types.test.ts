@@ -9,7 +9,10 @@ describe('api contract', () => {
       version: '0.5.0.7',
       capture: {
         state: 'capturing',
-        lastFrame: { timestamp: '2026-07-14T01:00:00Z', exposureUs: 30_000_000, gain: 250, isNight: true },
+        lastFrame: {
+          timestamp: '2026-07-14T01:00:00Z', exposureUs: 30_000_000, gain: 250, isNight: true,
+          meteredMean: 98.5, meteredAreaPct: 100,
+        },
       },
       astro: { sunAltDeg: -32.5, moonAltDeg: 12.1, moonPhasePct: 64, moonWaxing: true },
       camera: { model: 'ZWO ASI120MM Mini', maxWidth: 1280, maxHeight: 960, minExposureUs: 32 },
@@ -70,6 +73,7 @@ describe('api contract', () => {
       image: {
         maskMode: 'circle', maskCenterXPx: 640, maskCenterYPx: 480, maskRadiusPx: 620,
         crop: { x: 160, y: 120, width: 960, height: 720 },
+        meterPolygons: [],
       },
       location: { latitudeDeg: 50.45, longitudeDeg: 30.52 },
       sensor: { enabled: true },
@@ -99,6 +103,7 @@ describe('api contract', () => {
 
     const noMaskNoCrop: Settings['image'] = {
       maskMode: 'none', maskCenterXPx: 640, maskCenterYPx: 480, maskRadiusPx: 620, crop: null,
+      meterPolygons: [],
     }
     expect(noMaskNoCrop.crop).toBeNull()
   })
