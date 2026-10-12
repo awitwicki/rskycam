@@ -1,6 +1,7 @@
 mod auth;
 mod camera;
 mod capture;
+mod cli;
 mod darks;
 mod logs;
 mod overlay;
@@ -15,13 +16,20 @@ mod web;
 
 use std::sync::Arc;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    if std::env::args().nth(1).as_deref() == Some("--version") {
-        println!("rskycam {}", version::full());
-        return Ok(());
+fn main() -> anyhow::Result<()> {
+    match std::env::args().nth(1).as_deref() {
+        Some("--version") => {
+            println!("rskycam {}", version::full());
+            Ok(())
+        }
+        // Console client for an already-running instance (SSH, no browser).
+        Some("cli") => std::process::exit(cli::main(std::env::args().skip(2).collect())),
+        _ => serve(),
     }
+}
 
+#[tokio::main]
+async fn serve() -> anyhow::Result<()> {
     let data_dir = std::path::PathBuf::from(
         std::env::var("RSKYCAM_DATA").unwrap_or_else(|_| "/var/lib/rskycam".into()),
     );

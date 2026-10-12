@@ -45,6 +45,27 @@ Open `http://<your-pi-hostname-or-ip>:8080`. Default credentials:
 
 Change the password from **Settings** right after your first login.
 
+## Console access (SSH, no browser)
+
+The same binary has a console client, `rskycam cli`. It runs next to the
+running service and uses its API, so changes apply right away, just
+like they do from the web panel:
+
+```bash
+sudo -u rskycam rskycam cli            # interactive shell: status, settings, get, set, logs, watch
+sudo -u rskycam rskycam cli status     # or run one command and exit
+sudo -u rskycam rskycam cli settings camera
+sudo -u rskycam rskycam cli set camera.autoExposure false camera.manualGain 4
+sudo -u rskycam rskycam cli logs 100
+```
+
+When the CLI can read the data directory's `secret` file (as the service
+user or root), it signs in without a password. Otherwise it asks for
+the admin password (or reads `RSKYCAM_PASSWORD`). `--url http://host:8080`
+connects to another machine. If the service is stopped, `settings`,
+`get` and `set` edit `config.toml` directly. Run `rskycam cli --help`
+for every option.
+
 ## Optional: BME280 sensor
 
 A BME280 (or BMP280) breakout on the Pi's I²C pins adds outdoor

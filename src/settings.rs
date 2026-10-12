@@ -585,6 +585,14 @@ impl SettingsStore {
         }
     }
 
+    /// Load an existing config without creating or repairing anything — for
+    /// the offline CLI, which must never clobber the service's file.
+    pub fn load_existing(&self) -> anyhow::Result<ConfigFile> {
+        let raw = fs::read_to_string(&self.path)
+            .with_context(|| format!("reading {}", self.path.display()))?;
+        toml::from_str(&raw).with_context(|| format!("parsing {}", self.path.display()))
+    }
+
     #[allow(dead_code)]
     fn default_config(&self, password_hash: &str) -> ConfigFile {
         ConfigFile {
